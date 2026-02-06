@@ -96,8 +96,40 @@ class UserResponse(BaseModel):
 
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
+    email: Optional[EmailStr] = None
     role: Optional[UserRole] = None
     is_active: Optional[bool] = None
+    password: Optional[str] = None
+    
+    @field_validator('password')
+    @classmethod
+    def password_strength(cls, v):
+        if v is not None and len(v) < 6:
+            raise ValueError('Hasło musi mieć minimum 6 znaków')
+        return v
+
+
+class UserCreate(BaseModel):
+    """Schema for managers/owners to create new users"""
+    email: EmailStr
+    password: str
+    full_name: str
+    role: UserRole = UserRole.WORKER
+    is_active: bool = True
+    
+    @field_validator('password')
+    @classmethod
+    def password_strength(cls, v):
+        if len(v) < 6:
+            raise ValueError('Hasło musi mieć minimum 6 znaków')
+        return v
+    
+    @field_validator('full_name')
+    @classmethod
+    def name_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Imię i nazwisko jest wymagane')
+        return v.strip()
 
 
 class Token(BaseModel):

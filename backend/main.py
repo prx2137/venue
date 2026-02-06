@@ -21,7 +21,7 @@ from database import engine, get_db, Base
 from models import User, Event, Cost, Revenue, Receipt, ChatMessage
 from models import UserRole, CostCategory, RevenueSource, ReceiptStatus
 from schemas import (
-    UserLogin, UserRegister, UserResponse, UserUpdate, Token,
+    UserLogin, UserRegister, UserResponse, UserUpdate, UserCreate, Token,
     EventCreate, EventUpdate, EventResponse,
     CostCreate, CostUpdate, CostResponse,
     RevenueCreate, RevenueUpdate, RevenueResponse,
@@ -232,27 +232,91 @@ def list_users(
     current_user: User = Depends(require_role(["owner", "manager"])),
     db: Session = Depends(get_db)
 ):
-    users = db.query(User).all()
+    """Lista wszystkich użytkowników - tylko dla właścicieli i managerów"""
+    users = db.query(User).order_by(User.created_at.desc()).all()
     return [UserResponse.model_validate(u) for u in users]
+
+
+@app.post("/api/users", response_model=UserResponse)
+def create_user(
+    data: UserCreate,
+    current_user: User = Depends(require_role(["owner", "manager"])),
+    db: Session = Depends(get_db)
+):
+    """Tworzenie nowego użytkownika - tylko dla właścicieli i managerów"""
+    # Sprawdź czy email już istnieje
+    existing = db.query(User).filter(User.email == data.email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Użytkownik z tym adresem email już istnieje")
+    
+    # Manager nie może tworzyć właścicieli ani managerów
+    if current_user.role == "manager" and data.role.value in ["owner", "manager"]:
+        raise HTTPException(
+            status_code=403, 
+            detail="Manager może tworzyć tylko pracowników"
+        )
+    
+    user = User(
+        email=data.email,
+        hashed_password=get_password_hash(data.password),
+        full_name=data.full_name,
+        role=data.role.value,
+        is_active=data.is_active
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return UserResponse.model_validate(user)
 
 
 @app.put("/api/users/{user_id}", response_model=UserResponse)
 def update_user(
     user_id: int,
     data: UserUpdate,
-    current_user: User = Depends(require_role(["owner"])),
+    current_user: User = Depends(require_role(["owner", "manager"])),
     db: Session = Depends(get_db)
 ):
+    """Aktualizacja użytkownika - właściciele i managerzy z ograniczeniami"""
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Użytkownik nie znaleziony")
     
+    # Manager nie może edytować właścicieli ani managerów
+    if current_user.role == "manager":
+        if user.role in ["owner", "manager"]:
+            raise HTTPException(
+                status_code=403, 
+                detail="Manager nie może edytować właścicieli ani managerów"
+            )
+        # Manager nie może promować do managera/właściciela
+        if data.role and data.role.value in ["owner", "manager"]:
+            raise HTTPException(
+                status_code=403, 
+                detail="Manager nie może nadawać roli managera ani właściciela"
+            )
+    
+    # Nie można zdegradować samego siebie
+    if user_id == current_user.id and data.role and data.role.value != current_user.role:
+        raise HTTPException(status_code=400, detail="Nie można zmienić własnej roli")
+    
+    # Aktualizuj pola
     if data.full_name:
         user.full_name = data.full_name
+    if data.email:
+        # Sprawdź unikalność emaila
+        existing = db.query(User).filter(User.email == data.email, User.id != user_id).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Ten adres email jest już zajęty")
+        user.email = data.email
     if data.role:
         user.role = data.role.value
     if data.is_active is not None:
+        # Nie można dezaktywować samego siebie
+        if user_id == current_user.id and not data.is_active:
+            raise HTTPException(status_code=400, detail="Nie można dezaktywować własnego konta")
         user.is_active = data.is_active
+    if data.password:
+        user.hashed_password = get_password_hash(data.password)
     
     db.commit()
     db.refresh(user)
@@ -262,9 +326,10 @@ def update_user(
 @app.delete("/api/users/{user_id}")
 def delete_user(
     user_id: int,
-    current_user: User = Depends(require_role(["owner"])),
+    current_user: User = Depends(require_role(["owner", "manager"])),
     db: Session = Depends(get_db)
 ):
+    """Usuwanie użytkownika - właściciele i managerzy z ograniczeniami"""
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Nie można usunąć własnego konta")
     
@@ -272,9 +337,16 @@ def delete_user(
     if not user:
         raise HTTPException(status_code=404, detail="Użytkownik nie znaleziony")
     
+    # Manager nie może usuwać właścicieli ani managerów
+    if current_user.role == "manager" and user.role in ["owner", "manager"]:
+        raise HTTPException(
+            status_code=403, 
+            detail="Manager nie może usuwać właścicieli ani managerów"
+        )
+    
     db.delete(user)
     db.commit()
-    return {"message": "Użytkownik usunięty"}
+    return {"message": f"Użytkownik {user.full_name} został usunięty"}
 
 
 # ==================== EVENTS ====================

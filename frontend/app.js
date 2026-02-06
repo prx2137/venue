@@ -1124,6 +1124,19 @@ async function loadReport(eventId) {
 
 // ==================== USERS ====================
 
+function canManageUser(targetUser) {
+    // Nie można zarządzać sobą (z wyjątkiem edycji imienia)
+    if (targetUser.id === state.user.id) return false;
+    
+    // Właściciel może zarządzać wszystkimi
+    if (state.user.role === 'owner') return true;
+    
+    // Manager może zarządzać tylko pracownikami
+    if (state.user.role === 'manager' && targetUser.role === 'worker') return true;
+    
+    return false;
+}
+
 function renderUsers() {
     const list = $('#users-list');
     
@@ -1132,94 +1145,234 @@ function renderUsers() {
         return;
     }
     
-    list.innerHTML = state.users.map(u => `
-        <div class="card">
-            <div class="card-header">
-                <div>
-                    <div class="card-title">👤 ${escapeHtml(u.full_name)}</div>
-                    <div class="card-subtitle">${u.email}</div>
+    // Sortuj: właściciele > managerzy > pracownicy, potem alfabetycznie
+    const roleOrder = { owner: 0, manager: 1, worker: 2 };
+    const sortedUsers = [...state.users].sort((a, b) => {
+        const roleCompare = roleOrder[a.role] - roleOrder[b.role];
+        if (roleCompare !== 0) return roleCompare;
+        return a.full_name.localeCompare(b.full_name, 'pl');
+    });
+    
+    list.innerHTML = sortedUsers.map(u => {
+        const canManage = canManageUser(u);
+        const isCurrentUser = u.id === state.user.id;
+        const roleClass = u.role === 'owner' ? 'owner' : (u.role === 'manager' ? 'manager' : 'worker');
+        const roleEmoji = u.role === 'owner' ? '👑' : (u.role === 'manager' ? '🎯' : '👤');
+        
+        return `
+            <div class="card user-card ${roleClass}" data-user-id="${u.id}">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">${roleEmoji} ${escapeHtml(u.full_name)} ${isCurrentUser ? '<span class="you-badge">(Ty)</span>' : ''}</div>
+                        <div class="card-subtitle">📧 ${escapeHtml(u.email)}</div>
+                    </div>
+                    <span class="card-tag role-${u.role}">${getRoleLabel(u.role)}</span>
                 </div>
-                <span class="card-tag">${getRoleLabel(u.role)}</span>
-            </div>
-            <div class="card-footer">
-                <span class="${u.is_active ? 'text-success' : 'text-danger'}">${u.is_active ? '✓ Aktywny' : '✗ Nieaktywny'}</span>
-                ${state.user.role === 'owner' && u.id !== state.user.id ? `
-                <div class="card-actions">
-                    <button class="btn btn-small btn-secondary" onclick="editUser(${u.id})">✏️</button>
-                    <button class="btn btn-small btn-danger" onclick="deleteUser(${u.id})">🗑️</button>
+                <div class="card-body">
+                    <div class="user-details">
+                        <span class="${u.is_active ? 'status-active' : 'status-inactive'}">
+                            ${u.is_active ? '✅ Aktywny' : '❌ Nieaktywny'}
+                        </span>
+                        <span class="user-date">📅 Dołączył: ${formatDate(u.created_at)}</span>
+                    </div>
+                </div>
+                ${canManage ? `
+                <div class="card-footer">
+                    <div class="card-actions">
+                        <button class="btn btn-small btn-secondary" onclick="editUser(${u.id})" title="Edytuj użytkownika">
+                            ✏️ Edytuj
+                        </button>
+                        <button class="btn btn-small btn-danger" onclick="deleteUser(${u.id})" title="Usuń użytkownika">
+                            🗑️ Usuń
+                        </button>
+                    </div>
                 </div>
                 ` : ''}
             </div>
-        </div>
-    `).join('');
+        `;
+    }).join('');
+}
+
+function addUser() {
+    const isOwner = state.user.role === 'owner';
+    
+    const html = `
+        <form id="user-form">
+            <div class="form-group">
+                <label>Imię i nazwisko *</label>
+                <input type="text" name="full_name" required placeholder="np. Jan Kowalski">
+            </div>
+            <div class="form-group">
+                <label>Adres email *</label>
+                <input type="email" name="email" required placeholder="np. jan@example.com">
+            </div>
+            <div class="form-group">
+                <label>Hasło *</label>
+                <input type="password" name="password" required minlength="6" placeholder="Minimum 6 znaków">
+            </div>
+            <div class="form-group">
+                <label>Rola</label>
+                <select name="role" class="form-select">
+                    <option value="worker">👤 Pracownik</option>
+                    ${isOwner ? `
+                    <option value="manager">🎯 Manager</option>
+                    <option value="owner">👑 Właściciel</option>
+                    ` : ''}
+                </select>
+                ${!isOwner ? '<small class="form-hint">Jako manager możesz dodawać tylko pracowników</small>' : ''}
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="is_active" checked>
+                    <span>Konto aktywne</span>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
+                <button type="submit" class="btn btn-primary">➕ Dodaj użytkownika</button>
+            </div>
+        </form>
+    `;
+    
+    showModal('Dodaj nowego użytkownika', html);
+    
+    $('#user-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const submitBtn = e.target.querySelector('button[type="submit"]');
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Dodawanie...';
+        
+        try {
+            await api('/api/users', {
+                method: 'POST',
+                body: JSON.stringify({
+                    full_name: formData.get('full_name').trim(),
+                    email: formData.get('email').trim().toLowerCase(),
+                    password: formData.get('password'),
+                    role: formData.get('role'),
+                    is_active: formData.has('is_active')
+                })
+            });
+            toast('✅ Użytkownik został dodany!', 'success');
+            hideModal();
+            await loadUsers();
+            renderUsers();
+        } catch (error) {
+            toast(error.message || 'Błąd podczas dodawania użytkownika', 'error');
+            submitBtn.disabled = false;
+            submitBtn.textContent = '➕ Dodaj użytkownika';
+        }
+    };
 }
 
 function editUser(id) {
     const user = state.users.find(u => u.id === id);
     if (!user) return;
     
+    const isOwner = state.user.role === 'owner';
+    const canChangeRole = isOwner && user.id !== state.user.id;
+    
     const html = `
         <form id="user-form">
             <div class="form-group">
-                <label>Imię i nazwisko</label>
-                <input type="text" name="full_name" value="${escapeHtml(user.full_name)}">
+                <label>Imię i nazwisko *</label>
+                <input type="text" name="full_name" value="${escapeHtml(user.full_name)}" required>
+            </div>
+            <div class="form-group">
+                <label>Adres email *</label>
+                <input type="email" name="email" value="${escapeHtml(user.email)}" required>
+            </div>
+            <div class="form-group">
+                <label>Nowe hasło <small>(zostaw puste aby nie zmieniać)</small></label>
+                <input type="password" name="password" minlength="6" placeholder="Minimum 6 znaków">
             </div>
             <div class="form-group">
                 <label>Rola</label>
-                <select name="role" class="form-select">
-                    <option value="worker" ${user.role === 'worker' ? 'selected' : ''}>Pracownik</option>
-                    <option value="manager" ${user.role === 'manager' ? 'selected' : ''}>Manager</option>
-                    <option value="owner" ${user.role === 'owner' ? 'selected' : ''}>Właściciel</option>
+                <select name="role" class="form-select" ${!canChangeRole ? 'disabled' : ''}>
+                    <option value="worker" ${user.role === 'worker' ? 'selected' : ''}>👤 Pracownik</option>
+                    ${isOwner ? `
+                    <option value="manager" ${user.role === 'manager' ? 'selected' : ''}>🎯 Manager</option>
+                    <option value="owner" ${user.role === 'owner' ? 'selected' : ''}>👑 Właściciel</option>
+                    ` : ''}
                 </select>
+                ${!canChangeRole ? '<small class="form-hint">Nie możesz zmienić tej roli</small>' : ''}
             </div>
             <div class="form-group">
-                <label>
+                <label class="checkbox-label">
                     <input type="checkbox" name="is_active" ${user.is_active ? 'checked' : ''}>
-                    Aktywny
+                    <span>Konto aktywne</span>
                 </label>
             </div>
             <div class="form-actions">
                 <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
-                <button type="submit" class="btn btn-primary">Zapisz</button>
+                <button type="submit" class="btn btn-primary">💾 Zapisz zmiany</button>
             </div>
         </form>
     `;
     
-    showModal('Edytuj użytkownika', html);
+    showModal(`Edytuj: ${user.full_name}`, html);
     
     $('#user-form').onsubmit = async (e) => {
         e.preventDefault();
         const formData = new FormData(e.target);
+        const submitBtn = e.target.querySelector('button[type="submit"]');
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Zapisywanie...';
+        
+        const updateData = {
+            full_name: formData.get('full_name').trim(),
+            email: formData.get('email').trim().toLowerCase(),
+            is_active: formData.has('is_active')
+        };
+        
+        // Dodaj hasło tylko jeśli podane
+        const password = formData.get('password');
+        if (password && password.length > 0) {
+            updateData.password = password;
+        }
+        
+        // Dodaj rolę tylko jeśli można ją zmienić
+        if (canChangeRole) {
+            updateData.role = formData.get('role');
+        }
         
         try {
             await api(`/api/users/${user.id}`, {
                 method: 'PUT',
-                body: JSON.stringify({
-                    full_name: formData.get('full_name'),
-                    role: formData.get('role'),
-                    is_active: formData.has('is_active')
-                })
+                body: JSON.stringify(updateData)
             });
-            toast('Użytkownik zaktualizowany', 'success');
+            toast('✅ Użytkownik zaktualizowany!', 'success');
             hideModal();
             await loadUsers();
             renderUsers();
         } catch (error) {
-            toast(error.message, 'error');
+            toast(error.message || 'Błąd podczas aktualizacji', 'error');
+            submitBtn.disabled = false;
+            submitBtn.textContent = '💾 Zapisz zmiany';
         }
     };
 }
 
 async function deleteUser(id) {
-    if (!confirm('Czy na pewno chcesz usunąć tego użytkownika?')) return;
+    const user = state.users.find(u => u.id === id);
+    if (!user) return;
+    
+    const confirmMsg = `⚠️ Czy na pewno chcesz usunąć użytkownika?\n\n` +
+                      `Imię: ${user.full_name}\n` +
+                      `Email: ${user.email}\n` +
+                      `Rola: ${getRoleLabel(user.role)}\n\n` +
+                      `Ta operacja jest nieodwracalna!`;
+    
+    if (!confirm(confirmMsg)) return;
     
     try {
-        await api(`/api/users/${id}`, { method: 'DELETE' });
-        toast('Użytkownik usunięty', 'success');
+        const result = await api(`/api/users/${id}`, { method: 'DELETE' });
+        toast(`✅ ${result.message || 'Użytkownik usunięty'}`, 'success');
         await loadUsers();
         renderUsers();
     } catch (error) {
-        toast(error.message, 'error');
+        toast(error.message || 'Błąd podczas usuwania', 'error');
     }
 }
 
@@ -1339,6 +1492,12 @@ document.addEventListener('DOMContentLoaded', () => {
     $('#add-cost-btn').addEventListener('click', () => showCostForm());
     $('#add-revenue-btn').addEventListener('click', () => showRevenueForm());
     $('#add-receipt-btn').addEventListener('click', () => showReceiptForm());
+    
+    // User management button (only visible for owners/managers)
+    const addUserBtn = $('#add-user-btn');
+    if (addUserBtn) {
+        addUserBtn.addEventListener('click', () => addUser());
+    }
     
     // Filters
     $('#cost-event-filter').addEventListener('change', (e) => loadCosts(e.target.value || null));
