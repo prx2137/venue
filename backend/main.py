@@ -3,7 +3,7 @@ Music Venue Management System - FastAPI Backend
 With Receipt OCR and Live Chat Support
 """
 
-from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
@@ -16,6 +16,8 @@ import json
 import re
 import os
 import asyncio
+import base64
+import httpx
 
 from database import engine, get_db, Base
 from models import User, Event, Cost, Revenue, Receipt, ChatMessage
@@ -258,7 +260,7 @@ def create_user(
     
     user = User(
         email=data.email,
-        hashed_password=get_password_hash(data.password),
+        password_hash=get_password_hash(data.password),
         full_name=data.full_name,
         role=data.role.value,
         is_active=data.is_active
@@ -316,7 +318,7 @@ def update_user(
             raise HTTPException(status_code=400, detail="Nie można dezaktywować własnego konta")
         user.is_active = data.is_active
     if data.password:
-        user.hashed_password = get_password_hash(data.password)
+        user.password_hash = get_password_hash(data.password)
     
     db.commit()
     db.refresh(user)
@@ -636,22 +638,138 @@ def categorize_item(name: str) -> str:
     return 'bar_supplies'
 
 
+# OCR API configuration - using free OCR.space API
+OCR_API_KEY = os.environ.get("OCR_API_KEY", "K85674646288957")  # Free public key
+OCR_API_URL = "https://api.ocr.space/parse/image"
+
+
+async def perform_ocr_on_image(image_base64: str, mime_type: str = "image/jpeg") -> str:
+    """Send image to OCR.space API and get text"""
+    try:
+        # Prepare base64 data URL
+        data_url = f"data:{mime_type};base64,{image_base64}"
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                OCR_API_URL,
+                data={
+                    "apikey": OCR_API_KEY,
+                    "base64Image": data_url,
+                    "language": "pol",  # Polish
+                    "isOverlayRequired": "false",
+                    "detectOrientation": "true",
+                    "scale": "true",
+                    "OCREngine": "2",  # Better for receipts
+                }
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("ParsedResults"):
+                    return result["ParsedResults"][0].get("ParsedText", "")
+                elif result.get("ErrorMessage"):
+                    print(f"OCR Error: {result['ErrorMessage']}")
+                    return ""
+            return ""
+    except Exception as e:
+        print(f"OCR API Error: {e}")
+        return ""
+
+
+@app.post("/api/receipts/upload-image")
+async def upload_receipt_image(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Upload receipt image, perform OCR, and parse data"""
+    
+    # Validate file type
+    allowed_types = ["image/jpeg", "image/png", "image/jpg", "image/webp"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Nieprawidłowy format pliku. Dozwolone: JPEG, PNG, WebP"
+        )
+    
+    # Read and encode image
+    content = await file.read()
+    
+    # Check file size (max 5MB)
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Plik jest za duży (max 5MB)")
+    
+    image_base64 = base64.b64encode(content).decode('utf-8')
+    
+    # Perform OCR
+    ocr_text = await perform_ocr_on_image(image_base64, file.content_type)
+    
+    if not ocr_text:
+        # Store image even if OCR failed - can be manually reviewed
+        ocr_text = "(OCR nie rozpoznał tekstu - sprawdź ręcznie)"
+    
+    # Parse the OCR result
+    ocr_result = simple_ocr_parse(ocr_text)
+    ocr_result.raw_text = ocr_text
+    
+    # Parse date
+    receipt_date = None
+    if ocr_result.receipt_date:
+        for fmt in ['%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%Y/%m/%d', '%d.%m.%Y', '%d.%m.%y']:
+            try:
+                receipt_date = datetime.strptime(ocr_result.receipt_date, fmt)
+                break
+            except:
+                continue
+    
+    # Create receipt with image
+    receipt = Receipt(
+        store_name=ocr_result.store_name,
+        receipt_date=receipt_date,
+        total_amount=ocr_result.total,
+        ocr_text=ocr_text,
+        parsed_items=json.dumps([item.model_dump() for item in ocr_result.items]),
+        image_data=image_base64,
+        image_mime_type=file.content_type,
+        status=ReceiptStatus.PENDING.value,
+        uploaded_by=current_user.id
+    )
+    db.add(receipt)
+    db.commit()
+    db.refresh(receipt)
+    
+    return {
+        "id": receipt.id,
+        "store_name": receipt.store_name,
+        "receipt_date": receipt.receipt_date.isoformat() if receipt.receipt_date else None,
+        "total_amount": receipt.total_amount,
+        "ocr_result": {
+            "store_name": ocr_result.store_name,
+            "receipt_date": ocr_result.receipt_date,
+            "total": ocr_result.total,
+            "items": [item.model_dump() for item in ocr_result.items],
+            "raw_text": ocr_text
+        },
+        "status": receipt.status,
+        "has_image": True,
+        "created_at": receipt.created_at.isoformat()
+    }
+
+
 @app.post("/api/receipts/upload", response_model=ReceiptUploadResponse)
 def upload_receipt(data: ReceiptUpload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Upload and parse receipt OCR text"""
+    """Upload and parse receipt OCR text (legacy - text only)"""
     ocr_result = simple_ocr_parse(data.ocr_text)
+    ocr_result.raw_text = data.ocr_text
     
     receipt_date = None
     if ocr_result.receipt_date:
-        try:
-            for fmt in ['%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%Y/%m/%d', '%d.%m.%Y']:
-                try:
-                    receipt_date = datetime.strptime(ocr_result.receipt_date, fmt)
-                    break
-                except:
-                    continue
-        except:
-            pass
+        for fmt in ['%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%Y/%m/%d', '%d.%m.%Y']:
+            try:
+                receipt_date = datetime.strptime(ocr_result.receipt_date, fmt)
+                break
+            except:
+                continue
     
     receipt = Receipt(
         store_name=ocr_result.store_name,
@@ -673,14 +791,140 @@ def upload_receipt(data: ReceiptUpload, current_user: User = Depends(get_current
         total_amount=receipt.total_amount,
         ocr_result=ocr_result,
         status=receipt.status,
+        has_image=False,
         created_at=receipt.created_at
     )
 
 
-@app.get("/api/receipts", response_model=List[ReceiptResponse])
+@app.get("/api/receipts")
 def list_receipts(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """List all receipts with uploader info"""
     receipts = db.query(Receipt).order_by(Receipt.created_at.desc()).all()
-    return [ReceiptResponse.model_validate(r) for r in receipts]
+    
+    result = []
+    for r in receipts:
+        uploader = db.query(User).filter(User.id == r.uploaded_by).first()
+        result.append({
+            "id": r.id,
+            "store_name": r.store_name,
+            "receipt_date": r.receipt_date.isoformat() if r.receipt_date else None,
+            "total_amount": r.total_amount,
+            "status": r.status,
+            "uploaded_by": r.uploaded_by,
+            "uploaded_by_name": uploader.full_name if uploader else None,
+            "processed_by": r.processed_by,
+            "has_image": bool(r.image_data),
+            "created_at": r.created_at.isoformat(),
+            "processed_at": r.processed_at.isoformat() if r.processed_at else None
+        })
+    
+    return result
+
+
+@app.get("/api/receipts/{receipt_id}")
+def get_receipt_details(
+    receipt_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get receipt details including OCR text"""
+    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
+    if not receipt:
+        raise HTTPException(status_code=404, detail="Paragon nie znaleziony")
+    
+    uploader = db.query(User).filter(User.id == receipt.uploaded_by).first()
+    
+    return {
+        "id": receipt.id,
+        "store_name": receipt.store_name,
+        "receipt_date": receipt.receipt_date.isoformat() if receipt.receipt_date else None,
+        "total_amount": receipt.total_amount,
+        "ocr_text": receipt.ocr_text,
+        "parsed_items": json.loads(receipt.parsed_items) if receipt.parsed_items else [],
+        "status": receipt.status,
+        "uploaded_by": receipt.uploaded_by,
+        "uploaded_by_name": uploader.full_name if uploader else None,
+        "processed_by": receipt.processed_by,
+        "has_image": bool(receipt.image_data),
+        "created_at": receipt.created_at.isoformat(),
+        "processed_at": receipt.processed_at.isoformat() if receipt.processed_at else None
+    }
+
+
+@app.get("/api/receipts/{receipt_id}/image")
+def get_receipt_image(
+    receipt_id: int,
+    token: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Get receipt image - only for managers and owners. Supports token via query param for direct image loading."""
+    # Get user from token (either header or query param)
+    if token:
+        # Token from query parameter
+        payload = verify_token(token)
+        if not payload:
+            raise HTTPException(status_code=401, detail="Nieprawidłowy token")
+        user = db.query(User).filter(User.id == int(payload.get("sub"))).first()
+    else:
+        # Try to get from Authorization header
+        raise HTTPException(status_code=401, detail="Wymagana autoryzacja - podaj token")
+    
+    if not user:
+        raise HTTPException(status_code=401, detail="Użytkownik nie znaleziony")
+    
+    # Check permission
+    if user.role not in ['owner', 'manager']:
+        raise HTTPException(
+            status_code=403,
+            detail="Tylko manager i właściciel mogą przeglądać zdjęcia paragonów"
+        )
+    
+    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
+    if not receipt:
+        raise HTTPException(status_code=404, detail="Paragon nie znaleziony")
+    
+    if not receipt.image_data:
+        raise HTTPException(status_code=404, detail="Brak zdjęcia dla tego paragonu")
+    
+    # Decode and return image
+    image_bytes = base64.b64decode(receipt.image_data)
+    return Response(
+        content=image_bytes,
+        media_type=receipt.image_mime_type or "image/jpeg"
+    )
+
+
+@app.delete("/api/receipts/{receipt_id}")
+def delete_receipt(
+    receipt_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete a receipt - only owners and managers, or the uploader"""
+    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
+    if not receipt:
+        raise HTTPException(status_code=404, detail="Paragon nie znaleziony")
+    
+    # Check permission
+    can_delete = (
+        current_user.role in ['owner', 'manager'] or
+        receipt.uploaded_by == current_user.id
+    )
+    
+    if not can_delete:
+        raise HTTPException(status_code=403, detail="Brak uprawnień do usunięcia paragonu")
+    
+    # Check if receipt has associated costs
+    if receipt.costs:
+        raise HTTPException(
+            status_code=400,
+            detail="Nie można usunąć paragonu z przypisanymi kosztami"
+        )
+    
+    db.delete(receipt)
+    db.commit()
+    
+    return {"message": "Paragon usunięty"}
 
 
 @app.post("/api/receipts/{receipt_id}/create-costs")

@@ -138,6 +138,8 @@ class Receipt(Base):
     total_amount = Column(Float)
     ocr_text = Column(Text)  # Original OCR text
     parsed_items = Column(Text)  # JSON of parsed items
+    image_data = Column(Text)  # Base64 encoded image
+    image_mime_type = Column(String(50))  # image/jpeg, image/png, etc.
     status = Column(String(50), default=ReceiptStatus.PENDING.value)
     uploaded_by = Column(Integer, ForeignKey("users.id"), nullable=False)
     processed_by = Column(Integer, ForeignKey("users.id"), nullable=True)

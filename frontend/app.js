@@ -943,27 +943,36 @@ async function loadReceipts() {
 
 function renderReceipts() {
     const list = $('#receipts-list');
+    const canViewImages = ['owner', 'manager'].includes(state.user?.role);
     
     if (!state.receipts.length) {
-        list.innerHTML = '<p class="text-center" style="color: var(--text-muted)">Brak paragonów</p>';
+        list.innerHTML = '<p class="text-center" style="color: var(--text-muted)">Brak paragonów. Dodaj pierwszy paragon klikając przycisk powyżej.</p>';
         return;
     }
     
     list.innerHTML = state.receipts.map(r => `
-        <div class="card">
+        <div class="card receipt-card ${r.status}">
             <div class="card-header">
                 <div>
-                    <div class="card-title">🧾 ${r.store_name || 'Nieznany sklep'}</div>
-                    <div class="card-subtitle">${r.receipt_date ? formatDate(r.receipt_date) : 'Brak daty'}</div>
+                    <div class="card-title">
+                        ${r.has_image ? '📷' : '🧾'} ${escapeHtml(r.store_name || 'Nieznany sklep')}
+                    </div>
+                    <div class="card-subtitle">
+                        ${r.receipt_date ? formatDate(r.receipt_date) : 'Brak daty'}
+                        ${r.uploaded_by_name ? ` • Dodał: ${escapeHtml(r.uploaded_by_name)}` : ''}
+                    </div>
                 </div>
-                <span class="card-tag ${r.status === 'processed' ? 'text-success' : ''}">${r.status === 'processed' ? '✓ Przetworzony' : '⏳ Oczekuje'}</span>
+                <span class="card-tag ${r.status === 'processed' ? 'status-processed' : 'status-pending'}">
+                    ${r.status === 'processed' ? '✓ Przetworzony' : '⏳ Oczekuje'}
+                </span>
             </div>
             <div class="card-footer">
                 <span class="card-amount">${r.total_amount ? formatMoney(r.total_amount) : 'Brak kwoty'}</span>
-                ${r.status === 'pending' ? `
                 <div class="card-actions">
-                    <button class="btn btn-small btn-primary" onclick="createCostFromReceipt(${r.id})">💰 Utwórz koszt</button>
-                </div>` : ''}
+                    <button class="btn btn-small" onclick="showReceiptDetails(${r.id})">👁️ Szczegóły</button>
+                    ${r.has_image && canViewImages ? `<button class="btn btn-small" onclick="showReceiptImage(${r.id})">🖼️ Zdjęcie</button>` : ''}
+                    ${r.status === 'pending' ? `<button class="btn btn-small btn-primary" onclick="createCostFromReceipt(${r.id})">💰 Utwórz koszt</button>` : ''}
+                </div>
             </div>
         </div>
     `).join('');
@@ -971,24 +980,132 @@ function renderReceipts() {
 
 function showReceiptForm() {
     const html = `
-        <form id="receipt-form">
-            <div class="form-group">
-                <label>Tekst paragonu (OCR) *</label>
-                <textarea name="ocr_text" rows="10" placeholder="Wklej tekst zeskanowany z paragonu (np. Google Lens)..." required></textarea>
-            </div>
-            <p style="color: var(--text-muted); font-size: 12px; margin-bottom: 16px;">
-                💡 Użyj Google Lens lub podobnej aplikacji do zeskanowania paragonu, a następnie wklej tekst powyżej.
-            </p>
-            <div class="form-actions">
-                <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
-                <button type="submit" class="btn btn-primary">📤 Prześlij</button>
-            </div>
-        </form>
+        <div class="receipt-upload-tabs">
+            <button type="button" class="tab-btn active" onclick="switchReceiptTab('image')">📷 Zdjęcie paragonu</button>
+            <button type="button" class="tab-btn" onclick="switchReceiptTab('text')">📝 Tekst (ręcznie)</button>
+        </div>
+        
+        <div id="receipt-tab-image" class="receipt-tab active">
+            <form id="receipt-image-form">
+                <div class="form-group">
+                    <label>Wybierz zdjęcie paragonu *</label>
+                    <div class="file-upload-area" id="file-upload-area">
+                        <input type="file" name="receipt_image" id="receipt-image-input" accept="image/jpeg,image/png,image/webp" required hidden>
+                        <div class="upload-placeholder" onclick="$('#receipt-image-input').click()">
+                            <span class="upload-icon">📷</span>
+                            <span>Kliknij aby wybrać zdjęcie</span>
+                            <span class="upload-hint">lub przeciągnij i upuść</span>
+                        </div>
+                        <div class="upload-preview" id="upload-preview" style="display: none;">
+                            <img id="preview-image" src="" alt="Podgląd">
+                            <button type="button" class="btn btn-small" onclick="clearImagePreview()">✕ Usuń</button>
+                        </div>
+                    </div>
+                    <span class="form-hint">Obsługiwane formaty: JPEG, PNG, WebP. Maks. 5MB.</span>
+                </div>
+                <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 16px; background: var(--bg-tertiary); padding: 12px; border-radius: 8px;">
+                    💡 <strong>Wskazówka:</strong> Zrób wyraźne zdjęcie paragonu telefonem. System automatycznie rozpozna sklep, kwotę i datę.
+                </p>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
+                    <button type="submit" class="btn btn-primary" id="upload-image-btn">📤 Prześlij zdjęcie</button>
+                </div>
+            </form>
+        </div>
+        
+        <div id="receipt-tab-text" class="receipt-tab" style="display: none;">
+            <form id="receipt-text-form">
+                <div class="form-group">
+                    <label>Tekst paragonu (OCR) *</label>
+                    <textarea name="ocr_text" rows="8" placeholder="Wklej tekst zeskanowany z paragonu (np. Google Lens)..." required></textarea>
+                </div>
+                <p style="color: var(--text-muted); font-size: 12px; margin-bottom: 16px;">
+                    💡 Użyj Google Lens lub podobnej aplikacji do zeskanowania paragonu, a następnie wklej tekst powyżej.
+                </p>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
+                    <button type="submit" class="btn btn-primary">📤 Prześlij</button>
+                </div>
+            </form>
+        </div>
     `;
     
     showModal('Dodaj paragon', html);
     
-    $('#receipt-form').onsubmit = async (e) => {
+    // Setup file input handlers
+    const fileInput = $('#receipt-image-input');
+    const uploadArea = $('#file-upload-area');
+    
+    fileInput.addEventListener('change', handleImageSelect);
+    
+    // Drag and drop
+    uploadArea.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        uploadArea.classList.add('dragover');
+    });
+    
+    uploadArea.addEventListener('dragleave', () => {
+        uploadArea.classList.remove('dragover');
+    });
+    
+    uploadArea.addEventListener('drop', (e) => {
+        e.preventDefault();
+        uploadArea.classList.remove('dragover');
+        if (e.dataTransfer.files.length) {
+            fileInput.files = e.dataTransfer.files;
+            handleImageSelect({ target: fileInput });
+        }
+    });
+    
+    // Image upload form
+    $('#receipt-image-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const file = fileInput.files[0];
+        if (!file) {
+            toast('Wybierz zdjęcie paragonu', 'error');
+            return;
+        }
+        
+        const btn = $('#upload-image-btn');
+        btn.disabled = true;
+        btn.innerHTML = '⏳ Przetwarzanie OCR...';
+        
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            const response = await fetch(`${API_BASE}/api/receipts/upload-image`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${state.token}`
+                },
+                body: formData
+            });
+            
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Błąd przesyłania');
+            }
+            
+            const result = await response.json();
+            
+            let message = 'Paragon dodany!';
+            if (result.store_name) message += ` Sklep: ${result.store_name}`;
+            if (result.total_amount) message += ` | Kwota: ${formatMoney(result.total_amount)}`;
+            
+            toast(message, 'success');
+            hideModal();
+            await loadReceipts();
+        } catch (error) {
+            toast(error.message, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '📤 Prześlij zdjęcie';
+        }
+    };
+    
+    // Text upload form (legacy)
+    $('#receipt-text-form').onsubmit = async (e) => {
         e.preventDefault();
         const formData = new FormData(e.target);
         
@@ -1007,6 +1124,133 @@ function showReceiptForm() {
     };
 }
 
+function switchReceiptTab(tab) {
+    document.querySelectorAll('.receipt-upload-tabs .tab-btn').forEach(btn => btn.classList.remove('active'));
+    document.querySelectorAll('.receipt-tab').forEach(t => t.style.display = 'none');
+    
+    event.target.classList.add('active');
+    $(`#receipt-tab-${tab}`).style.display = 'block';
+}
+
+function handleImageSelect(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    // Validate
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+        toast('Nieprawidłowy format. Użyj JPEG, PNG lub WebP.', 'error');
+        return;
+    }
+    
+    if (file.size > 5 * 1024 * 1024) {
+        toast('Plik jest za duży (max 5MB)', 'error');
+        return;
+    }
+    
+    // Show preview
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        $('#preview-image').src = e.target.result;
+        $('.upload-placeholder').style.display = 'none';
+        $('#upload-preview').style.display = 'flex';
+    };
+    reader.readAsDataURL(file);
+}
+
+function clearImagePreview() {
+    $('#receipt-image-input').value = '';
+    $('#preview-image').src = '';
+    $('.upload-placeholder').style.display = 'flex';
+    $('#upload-preview').style.display = 'none';
+}
+
+async function showReceiptDetails(receiptId) {
+    try {
+        const receipt = await api(`/api/receipts/${receiptId}`);
+        
+        const itemsHtml = receipt.parsed_items?.length ? `
+            <div class="receipt-items">
+                <h4>Rozpoznane pozycje:</h4>
+                <ul>
+                    ${receipt.parsed_items.map(item => `
+                        <li>${escapeHtml(item.name)} - ${formatMoney(item.price)}</li>
+                    `).join('')}
+                </ul>
+            </div>
+        ` : '';
+        
+        const html = `
+            <div class="receipt-details">
+                <div class="detail-row">
+                    <span class="detail-label">Sklep:</span>
+                    <span class="detail-value">${escapeHtml(receipt.store_name || 'Nieznany')}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Data:</span>
+                    <span class="detail-value">${receipt.receipt_date ? formatDate(receipt.receipt_date) : 'Brak'}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Kwota:</span>
+                    <span class="detail-value" style="font-weight: 600; color: var(--primary);">
+                        ${receipt.total_amount ? formatMoney(receipt.total_amount) : 'Nie rozpoznano'}
+                    </span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Status:</span>
+                    <span class="detail-value">${receipt.status === 'processed' ? '✅ Przetworzony' : '⏳ Oczekuje'}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Dodał:</span>
+                    <span class="detail-value">${escapeHtml(receipt.uploaded_by_name || 'Nieznany')}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Data dodania:</span>
+                    <span class="detail-value">${formatDate(receipt.created_at)}</span>
+                </div>
+                ${receipt.has_image ? '<div class="detail-row"><span class="detail-label">Zdjęcie:</span><span class="detail-value">📷 Załączone</span></div>' : ''}
+                ${itemsHtml}
+                ${receipt.ocr_text ? `
+                    <div class="ocr-text-section">
+                        <h4>Tekst OCR:</h4>
+                        <pre class="ocr-text">${escapeHtml(receipt.ocr_text)}</pre>
+                    </div>
+                ` : ''}
+            </div>
+            <div class="form-actions" style="margin-top: 20px;">
+                <button type="button" class="btn btn-secondary" onclick="hideModal()">Zamknij</button>
+                ${receipt.has_image && ['owner', 'manager'].includes(state.user?.role) ? `
+                    <button type="button" class="btn btn-primary" onclick="showReceiptImage(${receiptId})">🖼️ Zobacz zdjęcie</button>
+                ` : ''}
+            </div>
+        `;
+        
+        showModal('Szczegóły paragonu', html);
+    } catch (error) {
+        toast(error.message, 'error');
+    }
+}
+
+function showReceiptImage(receiptId) {
+    if (!['owner', 'manager'].includes(state.user?.role)) {
+        toast('Tylko manager i właściciel mogą przeglądać zdjęcia paragonów', 'error');
+        return;
+    }
+    
+    const imageUrl = `${API_BASE}/api/receipts/${receiptId}/image?token=${state.token}`;
+    
+    const html = `
+        <div class="receipt-image-viewer">
+            <img src="${imageUrl}" alt="Zdjęcie paragonu" style="max-width: 100%; max-height: 70vh; border-radius: 8px;">
+        </div>
+        <div class="form-actions" style="margin-top: 20px;">
+            <button type="button" class="btn btn-secondary" onclick="hideModal()">Zamknij</button>
+            <a href="${imageUrl}" download="paragon_${receiptId}.jpg" class="btn btn-primary">📥 Pobierz</a>
+        </div>
+    `;
+    
+    showModal('Zdjęcie paragonu', html);
+}
+
 function createCostFromReceipt(receiptId) {
     const receipt = state.receipts.find(r => r.id === receiptId);
     if (!receipt) return;
@@ -1022,10 +1266,16 @@ function createCostFromReceipt(receiptId) {
     
     const html = `
         <form id="receipt-cost-form">
-            <p style="margin-bottom: 16px;">
-                <strong>Paragon:</strong> ${receipt.store_name || 'Nieznany sklep'}<br>
-                <strong>Kwota:</strong> ${receipt.total_amount ? formatMoney(receipt.total_amount) : 'Brak'}
-            </p>
+            <div class="receipt-summary">
+                <div class="summary-item">
+                    <span class="summary-label">Sklep:</span>
+                    <span class="summary-value">${escapeHtml(receipt.store_name || 'Nieznany sklep')}</span>
+                </div>
+                <div class="summary-item">
+                    <span class="summary-label">Kwota:</span>
+                    <span class="summary-value amount">${receipt.total_amount ? formatMoney(receipt.total_amount) : 'Brak'}</span>
+                </div>
+            </div>
             <div class="form-group">
                 <label>Wydarzenie *</label>
                 <select name="event_id" required class="form-select">${eventOptions}</select>

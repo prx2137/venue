@@ -270,6 +270,7 @@ class RevenueResponse(BaseModel):
 # ==================== RECEIPTS ====================
 
 class ReceiptUpload(BaseModel):
+    """Upload receipt via text (legacy)"""
     ocr_text: str
     
     @field_validator('ocr_text')
@@ -292,6 +293,7 @@ class ReceiptOCRResult(BaseModel):
     receipt_date: Optional[str] = None
     items: List[OCRItem] = []
     total: Optional[float] = None
+    raw_text: Optional[str] = None
 
 
 class ReceiptUploadResponse(BaseModel):
@@ -301,6 +303,7 @@ class ReceiptUploadResponse(BaseModel):
     total_amount: Optional[float]
     ocr_result: ReceiptOCRResult
     status: str
+    has_image: bool = False
     created_at: datetime
     
     model_config = {"from_attributes": True}
@@ -313,7 +316,9 @@ class ReceiptResponse(BaseModel):
     total_amount: Optional[float]
     status: str
     uploaded_by: int
+    uploaded_by_name: Optional[str] = None
     processed_by: Optional[int]
+    has_image: bool = False
     created_at: datetime
     processed_at: Optional[datetime]
     

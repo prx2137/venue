@@ -1090,6 +1090,223 @@ textarea {
     }
 }
 
+/* ==================== RECEIPTS ====================*/
+
+.receipt-upload-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+    border-bottom: 2px solid var(--border-color);
+    padding-bottom: 12px;
+}
+
+.receipt-upload-tabs .tab-btn {
+    background: var(--bg-tertiary);
+    border: none;
+    padding: 10px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    color: var(--text-secondary);
+    transition: all 0.2s;
+}
+
+.receipt-upload-tabs .tab-btn:hover {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+}
+
+.receipt-upload-tabs .tab-btn.active {
+    background: var(--primary);
+    color: white;
+}
+
+.file-upload-area {
+    border: 2px dashed var(--border-color);
+    border-radius: 12px;
+    padding: 30px;
+    text-align: center;
+    transition: all 0.2s;
+    background: var(--bg-tertiary);
+}
+
+.file-upload-area:hover,
+.file-upload-area.dragover {
+    border-color: var(--primary);
+    background: rgba(99, 102, 241, 0.05);
+}
+
+.upload-placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    color: var(--text-secondary);
+}
+
+.upload-icon {
+    font-size: 48px;
+}
+
+.upload-hint {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.upload-preview {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+}
+
+.upload-preview img {
+    max-width: 100%;
+    max-height: 200px;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.receipt-card {
+    border-left: 4px solid var(--border-color);
+}
+
+.receipt-card.pending {
+    border-left-color: var(--warning);
+}
+
+.receipt-card.processed {
+    border-left-color: var(--success);
+}
+
+.status-pending {
+    background: rgba(234, 179, 8, 0.2);
+    color: #eab308;
+}
+
+.status-processed {
+    background: rgba(34, 197, 94, 0.2);
+    color: var(--success);
+}
+
+.receipt-details {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.detail-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.detail-label {
+    color: var(--text-muted);
+    font-size: 14px;
+}
+
+.detail-value {
+    font-weight: 500;
+}
+
+.receipt-items {
+    margin-top: 16px;
+    padding: 16px;
+    background: var(--bg-tertiary);
+    border-radius: 8px;
+}
+
+.receipt-items h4 {
+    margin: 0 0 12px 0;
+    font-size: 14px;
+    color: var(--text-secondary);
+}
+
+.receipt-items ul {
+    margin: 0;
+    padding-left: 20px;
+}
+
+.receipt-items li {
+    margin: 6px 0;
+    font-size: 13px;
+}
+
+.ocr-text-section {
+    margin-top: 16px;
+}
+
+.ocr-text-section h4 {
+    margin: 0 0 8px 0;
+    font-size: 14px;
+    color: var(--text-secondary);
+}
+
+.ocr-text {
+    background: var(--bg-tertiary);
+    padding: 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    line-height: 1.5;
+    max-height: 200px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-family: 'Courier New', monospace;
+}
+
+.receipt-summary {
+    background: var(--bg-tertiary);
+    padding: 16px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+}
+
+.summary-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 0;
+}
+
+.summary-label {
+    color: var(--text-muted);
+}
+
+.summary-value {
+    font-weight: 500;
+}
+
+.summary-value.amount {
+    color: var(--primary);
+    font-size: 18px;
+}
+
+.receipt-image-viewer {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 16px;
+    background: var(--bg-tertiary);
+    border-radius: 8px;
+}
+
+@media (max-width: 768px) {
+    .receipt-upload-tabs {
+        flex-direction: column;
+    }
+    
+    .file-upload-area {
+        padding: 20px;
+    }
+    
+    .upload-icon {
+        font-size: 36px;
+    }
+}
+
 /* ==================== USER MANAGEMENT ==================== */
 
 .users-info-box {
