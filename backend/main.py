@@ -639,7 +639,7 @@ def categorize_item(name: str) -> str:
 
 
 # OCR API configuration - using free OCR.space API
-OCR_API_KEY = os.environ.get("OCR_API_KEY", "K85674646288957")  # Free public key
+OCR_API_KEY = os.environ.get("OCR_API_KEY", "K82925827188957")  # Your OCR.space API key
 OCR_API_URL = "https://api.ocr.space/parse/image"
 
 
