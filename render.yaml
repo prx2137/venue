@@ -1,0 +1,15 @@
+# Render.com Blueprint
+# Deploy both backend API and frontend from single service
+
+services:
+  - type: web
+    name: music-venue-app
+    runtime: python
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: FRONTEND_URL
+        value: "*"
+    healthCheckPath: /health

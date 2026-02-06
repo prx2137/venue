@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="description" content="Music Venue Management System - Zarządzaj wydarzeniami, kosztami i przychodami swojego klubu muzycznego">
+    <meta name="theme-color" content="#6366f1">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    
+    <title>🎵 Music Venue Manager</title>
+    
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    
+    <!-- Styles -->
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- Login Page -->
+    <div id="login-page" class="login-container">
+        <div class="login-card">
+            <div class="login-header">
+                <div class="login-logo">🎵</div>
+                <h1 class="login-title">Music Venue</h1>
+                <p class="login-subtitle">Zaloguj się do systemu zarządzania</p>
+            </div>
+            
+            <form id="login-form" class="login-form">
+                <div class="form-group">
+                    <label class="form-label" for="login-email">Email</label>
+                    <input type="email" id="login-email" class="form-input" placeholder="admin@venue.com" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label" for="login-password">Hasło</label>
+                    <input type="password" id="login-password" class="form-input" placeholder="••••••••" required>
+                </div>
+                <div id="login-error" class="alert alert-danger hidden"></div>
+                <button type="submit" class="btn btn-primary btn-lg">
+                    <i class="fas fa-sign-in-alt"></i>
+                    Zaloguj się
+                </button>
+            </form>
+            
+            <div class="login-footer">
+                <p class="text-muted">Nie masz konta? <a href="#" onclick="showRegister()">Zarejestruj się</a></p>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Register Modal -->
+    <div id="register-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 class="modal-title">Rejestracja</h3>
+                <button class="modal-close" onclick="closeModal('register-modal')">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <form id="register-form" class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Imię i nazwisko</label>
+                    <input type="text" name="full_name" class="form-input" placeholder="Jan Kowalski" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Email</label>
+                    <input type="email" name="email" class="form-input" placeholder="jan@example.com" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Hasło</label>
+                    <input type="password" name="password" class="form-input" placeholder="Min. 8 znaków, wielka litera, cyfra" required minlength="8">
+                </div>
+                <div id="register-error" class="alert alert-danger hidden"></div>
+            </form>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('register-modal')">Anuluj</button>
+                <button type="submit" form="register-form" class="btn btn-primary">
+                    <i class="fas fa-user-plus"></i> Zarejestruj
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Main App -->
+    <div id="app" class="app-container hidden">
+        <!-- Mobile Menu Toggle -->
+        <button id="mobile-menu-toggle" class="mobile-menu-toggle">
+            <i class="fas fa-bars"></i>
+        </button>
+        
+        <!-- Mobile Overlay -->
+        <div id="mobile-overlay" class="mobile-overlay"></div>
+        
+        <!-- Sidebar -->
+        <aside id="sidebar" class="sidebar">
+            <div class="sidebar-header">
+                <div class="sidebar-logo">
+                    <div class="logo-icon">🎵</div>
+                    <h1>Music Venue</h1>
+                </div>
+            </div>
+            
+            <nav class="sidebar-nav">
+                <div class="nav-section">
+                    <div class="nav-section-title">Menu główne</div>
+                    <div class="nav-item active" data-page="dashboard" onclick="navigate('dashboard')">
+                        <i class="fas fa-chart-pie"></i>
+                        <span>Dashboard</span>
+                    </div>
+                    <div class="nav-item" data-page="events" onclick="navigate('events')">
+                        <i class="fas fa-calendar-alt"></i>
+                        <span>Wydarzenia</span>
+                    </div>
+                </div>
+                
+                <div class="nav-section">
+                    <div class="nav-section-title">Finanse</div>
+                    <div class="nav-item" data-page="costs" onclick="navigate('costs')">
+                        <i class="fas fa-receipt"></i>
+                        <span>Koszty</span>
+                    </div>
+                    <div class="nav-item" data-page="revenue" onclick="navigate('revenue')">
+                        <i class="fas fa-coins"></i>
+                        <span>Przychody</span>
+                    </div>
+                    <div class="nav-item" data-page="reports" onclick="navigate('reports')">
+                        <i class="fas fa-file-invoice-dollar"></i>
+                        <span>Raporty</span>
+                    </div>
+                </div>
+                
+                <div class="nav-section" id="admin-section">
+                    <div class="nav-section-title">Administracja</div>
+                    <div class="nav-item" data-page="users" onclick="navigate('users')">
+                        <i class="fas fa-users-cog"></i>
+                        <span>Użytkownicy</span>
+                    </div>
+                </div>
+            </nav>
+            
+            <div class="sidebar-footer">
+                <div class="user-info">
+                    <div class="user-avatar" id="user-avatar">A</div>
+                    <div class="user-details">
+                        <div class="user-name" id="user-name">Admin</div>
+                        <div class="user-role" id="user-role">Owner</div>
+                    </div>
+                    <button class="btn btn-icon btn-secondary" onclick="logout()" title="Wyloguj">
+                        <i class="fas fa-sign-out-alt"></i>
+                    </button>
+                </div>
+            </div>
+        </aside>
+        
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Dashboard Page -->
+            <div id="page-dashboard" class="page">
+                <div class="content-header">
+                    <h2><i class="fas fa-chart-pie"></i> Dashboard</h2>
+                </div>
+                <div class="content-body">
+                    <div class="stats-grid" id="dashboard-stats">
+                        <!-- Stats loaded dynamically -->
+                    </div>
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Ostatnie wydarzenia</h3>
+                            <button class="btn btn-sm btn-primary" onclick="navigate('events')">
+                                Zobacz wszystkie
+                            </button>
+                        </div>
+                        <div class="card-body" id="recent-events">
+                            <!-- Recent events loaded dynamically -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Events Page -->
+            <div id="page-events" class="page hidden">
+                <div class="content-header">
+                    <h2><i class="fas fa-calendar-alt"></i> Wydarzenia</h2>
+                    <button class="btn btn-primary" onclick="showEventModal()" id="add-event-btn">
+                        <i class="fas fa-plus"></i> Dodaj wydarzenie
+                    </button>
+                </div>
+                <div class="content-body">
+                    <div class="card">
+                        <div class="table-container">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Nazwa</th>
+                                        <th>Data</th>
+                                        <th>Pojemność</th>
+                                        <th>Bilet</th>
+                                        <th>Koszty</th>
+                                        <th>Przychody</th>
+                                        <th>Zysk</th>
+                                        <th>Akcje</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="events-table">
+                                    <!-- Events loaded dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Costs Page -->
+            <div id="page-costs" class="page hidden">
+                <div class="content-header">
+                    <h2><i class="fas fa-receipt"></i> Koszty</h2>
+                    <button class="btn btn-primary" onclick="showCostModal()" id="add-cost-btn">
+                        <i class="fas fa-plus"></i> Dodaj koszt
+                    </button>
+                </div>
+                <div class="content-body">
+                    <div class="stats-grid" id="costs-stats"></div>
+                    <div class="card">
+                        <div class="table-container">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Wydarzenie</th>
+                                        <th>Kategoria</th>
+                                        <th>Kwota</th>
+                                        <th>Opis</th>
+                                        <th>Data</th>
+                                        <th>Akcje</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="costs-table">
+                                    <!-- Costs loaded dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Revenue Page -->
+            <div id="page-revenue" class="page hidden">
+                <div class="content-header">
+                    <h2><i class="fas fa-coins"></i> Przychody</h2>
+                    <button class="btn btn-primary" onclick="showRevenueModal()" id="add-revenue-btn">
+                        <i class="fas fa-plus"></i> Dodaj przychód
+                    </button>
+                </div>
+                <div class="content-body">
+                    <div class="stats-grid" id="revenue-stats"></div>
+                    <div class="card">
+                        <div class="table-container">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Wydarzenie</th>
+                                        <th>Źródło</th>
+                                        <th>Kwota</th>
+                                        <th>Opis</th>
+                                        <th>Data</th>
+                                        <th>Akcje</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="revenue-table">
+                                    <!-- Revenue loaded dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Reports Page -->
+            <div id="page-reports" class="page hidden">
+                <div class="content-header">
+                    <h2><i class="fas fa-file-invoice-dollar"></i> Raporty finansowe</h2>
+                </div>
+                <div class="content-body">
+                    <div class="card mb-lg">
+                        <div class="card-header">
+                            <h3>Wybierz okres</h3>
+                        </div>
+                        <div class="card-body">
+                            <form id="report-form" class="flex gap-md items-center" style="flex-wrap: wrap;">
+                                <div class="form-group" style="margin-bottom: 0;">
+                                    <label class="form-label">Od</label>
+                                    <input type="date" id="report-from" class="form-input" required>
+                                </div>
+                                <div class="form-group" style="margin-bottom: 0;">
+                                    <label class="form-label">Do</label>
+                                    <input type="date" id="report-to" class="form-input" required>
+                                </div>
+                                <button type="submit" class="btn btn-primary" style="align-self: flex-end;">
+                                    <i class="fas fa-search"></i> Generuj raport
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                    <div id="report-results"></div>
+                </div>
+            </div>
+            
+            <!-- Users Page -->
+            <div id="page-users" class="page hidden">
+                <div class="content-header">
+                    <h2><i class="fas fa-users-cog"></i> Zarządzanie użytkownikami</h2>
+                </div>
+                <div class="content-body">
+                    <div class="card">
+                        <div class="table-container">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Użytkownik</th>
+                                        <th>Email</th>
+                                        <th>Rola</th>
+                                        <th>Status</th>
+                                        <th>Utworzony</th>
+                                        <th>Akcje</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="users-table">
+                                    <!-- Users loaded dynamically -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    
+    <!-- Event Modal -->
+    <div id="event-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 class="modal-title" id="event-modal-title">Dodaj wydarzenie</h3>
+                <button class="modal-close" onclick="closeModal('event-modal')">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <form id="event-form" class="modal-body">
+                <input type="hidden" id="event-id">
+                <div class="form-group">
+                    <label class="form-label">Nazwa wydarzenia *</label>
+                    <input type="text" id="event-name" class="form-input" placeholder="Rock Night" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Data *</label>
+                    <input type="datetime-local" id="event-date" class="form-input" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Pojemność</label>
+                    <input type="number" id="event-capacity" class="form-input" placeholder="500" min="0">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Cena biletu (PLN)</label>
+                    <input type="number" id="event-fee" class="form-input" placeholder="50" min="0" step="0.01">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Opis</label>
+                    <textarea id="event-description" class="form-textarea" placeholder="Opis wydarzenia..."></textarea>
+                </div>
+            </form>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('event-modal')">Anuluj</button>
+                <button type="submit" form="event-form" class="btn btn-primary">
+                    <i class="fas fa-save"></i> Zapisz
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Cost Modal -->
+    <div id="cost-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 class="modal-title">Dodaj koszt</h3>
+                <button class="modal-close" onclick="closeModal('cost-modal')">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <form id="cost-form" class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Wydarzenie *</label>
+                    <select id="cost-event" class="form-select" required>
+                        <option value="">Wybierz wydarzenie</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Kategoria *</label>
+                    <select id="cost-category" class="form-select" required>
+                        <option value="">Wybierz kategorię</option>
+                        <option value="supplies">📦 Zatowarowanie</option>
+                        <option value="equipment">🎸 Sprzęt</option>
+                        <option value="services">🛠️ Usługi</option>
+                        <option value="personnel">👥 Personel</option>
+                        <option value="transport">🚚 Transport</option>
+                        <option value="other">📋 Inne</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Kwota (PLN) *</label>
+                    <input type="number" id="cost-amount" class="form-input" placeholder="1000" min="0.01" step="0.01" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Opis</label>
+                    <textarea id="cost-description" class="form-textarea" placeholder="Szczegóły kosztu..."></textarea>
+                </div>
+            </form>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('cost-modal')">Anuluj</button>
+                <button type="submit" form="cost-form" class="btn btn-primary">
+                    <i class="fas fa-save"></i> Zapisz
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Revenue Modal -->
+    <div id="revenue-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 class="modal-title">Dodaj przychód</h3>
+                <button class="modal-close" onclick="closeModal('revenue-modal')">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <form id="revenue-form" class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Wydarzenie *</label>
+                    <select id="revenue-event" class="form-select" required>
+                        <option value="">Wybierz wydarzenie</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Źródło *</label>
+                    <select id="revenue-source" class="form-select" required>
+                        <option value="">Wybierz źródło</option>
+                        <option value="box_office">🎟️ Bramka</option>
+                        <option value="bar">🍺 Bar</option>
+                        <option value="merchandise">👕 Merchandise</option>
+                        <option value="other">📋 Inne</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Kwota (PLN) *</label>
+                    <input type="number" id="revenue-amount" class="form-input" placeholder="5000" min="0.01" step="0.01" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Opis</label>
+                    <textarea id="revenue-description" class="form-textarea" placeholder="Szczegóły przychodu..."></textarea>
+                </div>
+            </form>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('revenue-modal')">Anuluj</button>
+                <button type="submit" form="revenue-form" class="btn btn-primary">
+                    <i class="fas fa-save"></i> Zapisz
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- User Role Modal -->
+    <div id="user-modal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 class="modal-title">Zmień rolę użytkownika</h3>
+                <button class="modal-close" onclick="closeModal('user-modal')">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <form id="user-form" class="modal-body">
+                <input type="hidden" id="user-edit-id">
+                <div class="form-group">
+                    <label class="form-label">Nowa rola</label>
+                    <select id="user-role-select" class="form-select" required>
+                        <option value="worker">👷 Worker</option>
+                        <option value="manager">📊 Manager</option>
+                        <option value="owner">👑 Owner</option>
+                    </select>
+                </div>
+            </form>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('user-modal')">Anuluj</button>
+                <button type="submit" form="user-form" class="btn btn-primary">
+                    <i class="fas fa-save"></i> Zapisz
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Toast Container -->
+    <div id="toast-container" class="toast-container"></div>
+    
+    <!-- Loading Overlay -->
+    <div id="loading" class="loading-overlay hidden">
+        <div class="loading-spinner"></div>
+    </div>
+    
+    <script src="config.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
