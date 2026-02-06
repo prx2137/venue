@@ -1074,7 +1074,7 @@ function showReceiptForm() {
             const formData = new FormData();
             formData.append('file', file);
             
-            const response = await fetch(`${API_BASE}/api/receipts/upload-image`, {
+            const response = await fetch(`${API_URL}/api/receipts/upload-image`, {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${state.token}`
@@ -1236,7 +1236,7 @@ function showReceiptImage(receiptId) {
         return;
     }
     
-    const imageUrl = `${API_BASE}/api/receipts/${receiptId}/image?token=${state.token}`;
+    const imageUrl = `${API_URL}/api/receipts/${receiptId}/image?token=${state.token}`;
     
     const html = `
         <div class="receipt-image-viewer">
