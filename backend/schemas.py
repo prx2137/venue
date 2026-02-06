@@ -1,6 +1,7 @@
 """
 Pydantic Schemas for Music Venue Management System
 With Receipt OCR, Live Chat, and Calendar support
+FIXED VERSION - Added missing schemas
 """
 
 from pydantic import BaseModel, EmailStr, field_validator
@@ -22,10 +23,12 @@ class CostCategory(str, Enum):
     BAR_BEVERAGES = "bar_beverages"
     BAR_FOOD = "bar_food"
     BAR_SUPPLIES = "bar_supplies"
+    BAR_STOCK = "bar_stock"
     ARTIST_FEE = "artist_fee"
     SOUND_ENGINEER = "sound_engineer"
     LIGHTING = "lighting"
     STAFF_WAGES = "staff_wages"
+    STAFF = "staff"
     SECURITY = "security"
     CLEANING = "cleaning"
     UTILITIES = "utilities"
@@ -37,7 +40,9 @@ class CostCategory(str, Enum):
 
 class RevenueSource(str, Enum):
     BOX_OFFICE = "box_office"
+    TICKETS = "tickets"
     BAR_SALES = "bar_sales"
+    BAR = "bar"
     MERCHANDISE = "merchandise"
     SPONSORSHIP = "sponsorship"
     OTHER = "other"
@@ -45,6 +50,7 @@ class RevenueSource(str, Enum):
 
 class ReceiptStatus(str, Enum):
     PENDING = "pending"
+    SCANNED = "scanned"
     PROCESSED = "processed"
     REJECTED = "rejected"
 
@@ -58,8 +64,13 @@ class MessageType(str, Enum):
 # ==================== AUTH ====================
 
 class UserLogin(BaseModel):
+    """Login request schema"""
     email: EmailStr
     password: str
+
+
+# Alias for backwards compatibility
+LoginRequest = UserLogin
 
 
 class UserRegister(BaseModel):
@@ -133,9 +144,14 @@ class UserCreate(BaseModel):
 
 
 class Token(BaseModel):
+    """Token response after successful login"""
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
+
+
+# Alias for backwards compatibility - THIS WAS MISSING!
+TokenResponse = Token
 
 
 # ==================== EVENTS ====================
@@ -143,9 +159,13 @@ class Token(BaseModel):
 class EventCreate(BaseModel):
     name: str
     description: Optional[str] = None
-    event_date: datetime
+    date: datetime  # Changed from event_date to match model
     venue_capacity: Optional[int] = 0
     ticket_price: Optional[float] = 0.0
+    expected_attendees: Optional[int] = 0
+    genre: Optional[str] = None
+    status: Optional[str] = "upcoming"
+    notes: Optional[str] = None
     
     @field_validator('name')
     @classmethod
@@ -158,21 +178,29 @@ class EventCreate(BaseModel):
 class EventUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
-    event_date: Optional[datetime] = None
+    date: Optional[datetime] = None
     venue_capacity: Optional[int] = None
     ticket_price: Optional[float] = None
+    expected_attendees: Optional[int] = None
+    actual_attendees: Optional[int] = None
+    genre: Optional[str] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
 
 
 class EventResponse(BaseModel):
     id: int
     name: str
-    description: Optional[str]
-    event_date: datetime
-    venue_capacity: int
-    ticket_price: float
-    created_by: Optional[int]
+    description: Optional[str] = None
+    date: datetime
+    ticket_price: float = 0
+    expected_attendees: int = 0
+    actual_attendees: Optional[int] = None
+    genre: Optional[str] = None
+    status: str = "upcoming"
+    notes: Optional[str] = None
+    created_by: Optional[int] = None
     created_at: datetime
-    is_past: bool = False
     
     model_config = {"from_attributes": True}
 
@@ -212,9 +240,8 @@ class CostResponse(BaseModel):
     event_id: int
     category: str
     amount: float
-    description: Optional[str]
-    receipt_id: Optional[int]
-    created_by: Optional[int]
+    description: Optional[str] = None
+    created_by: Optional[int] = None
     created_at: datetime
     
     model_config = {"from_attributes": True}
@@ -224,7 +251,7 @@ class CostResponse(BaseModel):
 
 class RevenueCreate(BaseModel):
     event_id: int
-    source: str
+    category: str  # Changed from 'source' to match model
     amount: float
     description: Optional[str] = None
     
@@ -237,7 +264,7 @@ class RevenueCreate(BaseModel):
 
 
 class RevenueUpdate(BaseModel):
-    source: Optional[str] = None
+    category: Optional[str] = None
     amount: Optional[float] = None
     description: Optional[str] = None
     
@@ -252,11 +279,59 @@ class RevenueUpdate(BaseModel):
 class RevenueResponse(BaseModel):
     id: int
     event_id: int
-    source: str
+    category: str
     amount: float
-    description: Optional[str]
-    recorded_by: Optional[int]
+    description: Optional[str] = None
+    created_by: Optional[int] = None
     created_at: datetime
+    
+    model_config = {"from_attributes": True}
+
+
+# ==================== STAFF ASSIGNMENTS - MISSING! ====================
+
+class StaffAssignmentCreate(BaseModel):
+    """Schema for creating staff assignments"""
+    event_id: int
+    position: str
+    name: str
+    hours: Optional[float] = None
+    hourly_rate: Optional[float] = None
+    notes: Optional[str] = None
+    
+    @field_validator('name')
+    @classmethod
+    def name_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Imię pracownika jest wymagane')
+        return v.strip()
+    
+    @field_validator('position')
+    @classmethod
+    def position_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Stanowisko jest wymagane')
+        return v.strip()
+
+
+class StaffAssignmentUpdate(BaseModel):
+    """Schema for updating staff assignments"""
+    position: Optional[str] = None
+    name: Optional[str] = None
+    hours: Optional[float] = None
+    hourly_rate: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class StaffAssignmentResponse(BaseModel):
+    """Schema for staff assignment response"""
+    id: int
+    event_id: int
+    position: str
+    name: str
+    hours: Optional[float] = None
+    hourly_rate: Optional[float] = None
+    notes: Optional[str] = None
     
     model_config = {"from_attributes": True}
 
@@ -292,9 +367,9 @@ class ReceiptOCRResult(BaseModel):
 
 class ReceiptUploadResponse(BaseModel):
     id: int
-    store_name: Optional[str]
+    store_name: Optional[str] = None
     receipt_date: Optional[str] = None
-    total_amount: Optional[float]
+    total_amount: Optional[float] = None
     items: List[OCRItem] = []
     status: str
     message: str = ""
@@ -303,9 +378,9 @@ class ReceiptUploadResponse(BaseModel):
 
 class ReceiptResponse(BaseModel):
     id: int
-    store_name: Optional[str]
-    receipt_date: Optional[datetime]
-    total_amount: Optional[float]
+    store_name: Optional[str] = None
+    receipt_date: Optional[str] = None
+    total_amount: Optional[float] = None
     status: str
     uploaded_by: int
     uploader_name: Optional[str] = None
@@ -319,6 +394,15 @@ class CreateCostsFromReceipt(BaseModel):
     receipt_id: int
     event_id: int
     category: str = "bar_supplies"
+
+
+# THIS WAS MISSING!
+class ReceiptToCost(BaseModel):
+    """Schema for creating cost from receipt"""
+    event_id: int
+    amount: Optional[float] = None
+    description: Optional[str] = None
+    category: Optional[str] = "bar_stock"
 
 
 # ==================== CHAT ====================
