@@ -128,7 +128,28 @@ function logout() {
     showLogin();
 }
 
-function checkAuth() {
+async function checkAuth() {
+    // First check for URL parameters (auto-login)
+    const urlParams = new URLSearchParams(window.location.search);
+    const emailParam = urlParams.get('email');
+    const passwordParam = urlParams.get('password');
+    
+    if (emailParam && passwordParam) {
+        // Clear URL parameters for security
+        const cleanUrl = window.location.origin + window.location.pathname;
+        window.history.replaceState({}, document.title, cleanUrl);
+        
+        // Attempt login with URL parameters
+        try {
+            await login(emailParam, passwordParam);
+            return; // Login successful, exit
+        } catch (error) {
+            console.error('URL login failed:', error);
+            // Continue to normal flow
+        }
+    }
+    
+    // Normal auth check from localStorage
     const token = localStorage.getItem('authToken');
     const user = localStorage.getItem('currentUser');
     
@@ -1656,7 +1677,7 @@ async function renderChat() {
                     <div class="loading"><div class="spinner"></div></div>
                 </div>
                 <div class="typing-indicator" id="typingIndicator" style="display: none"></div>
-                <div class="chat-input-area">
+                <div class="chat-input-container">
                     <input type="text" id="chatInput" placeholder="Napisz wiadomość..." 
                            onkeypress="handleChatKeypress(event)" oninput="handleChatInput()">
                     <button class="btn btn-primary" onclick="sendChatMessage()">Wyślij</button>
@@ -2136,4 +2157,6 @@ function showToast(title, message, type = 'info') {
 }
 
 // ============== INITIALIZATION ==============
-document.addEventListener('DOMContentLoaded', checkAuth);
+document.addEventListener('DOMContentLoaded', () => {
+    checkAuth();
+});

@@ -2,211 +2,41 @@
 <html lang="pl">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <meta name="theme-color" content="#6366f1">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+    <meta name="theme-color" content="#0a0d14">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="description" content="Profesjonalny system zarządzania klubem muzycznym">
     <title>🎵 Music Venue - System Zarządzania</title>
+    
+    <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Styles -->
     <link rel="stylesheet" href="/app/styles.css">
+    
+    <!-- Favicon -->
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎵</text></svg>">
+    
+    <!-- iOS icons -->
+    <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎵</text></svg>">
 </head>
 <body>
-    <!-- Login Screen -->
-    <div id="login-screen" class="login-screen">
-        <div class="login-container">
-            <div class="login-header">
-                <div class="logo">🎵</div>
-                <h1>Music Venue</h1>
-                <p>System Zarządzania Klubem</p>
-            </div>
-            <form id="login-form" class="login-form">
-                <div class="form-group">
-                    <label>Email</label>
-                    <input type="email" name="email" placeholder="twoj@email.com" required>
-                </div>
-                <div class="form-group">
-                    <label>Hasło</label>
-                    <input type="password" name="password" placeholder="••••••••" required>
-                </div>
-                <button type="submit" class="btn btn-primary btn-block">
-                    Zaloguj się
-                </button>
-            </form>
+    <!-- Toast Notifications Container -->
+    <div id="toastContainer" class="toast-container"></div>
+    
+    <!-- Main Application Container -->
+    <div id="app">
+        <!-- Content rendered dynamically by app.js -->
+        <div class="loading" style="min-height: 100vh; display: flex; align-items: center; justify-content: center;">
+            <div class="spinner"></div>
+            <span class="loading-text" style="margin-left: 1rem;">Ładowanie...</span>
         </div>
     </div>
-
-    <!-- Main App -->
-    <div id="app" style="display: none;">
-        <!-- Header -->
-        <header class="app-header">
-            <div class="header-left">
-                <span class="app-title">🎵 Music Venue</span>
-            </div>
-            <div class="header-right">
-                <div class="user-info">
-                    <span id="user-name">Użytkownik</span>
-                    <span id="user-role" class="user-role">Pracownik</span>
-                </div>
-                <button id="logout-btn" class="btn btn-small">Wyloguj</button>
-            </div>
-        </header>
-
-        <!-- Navigation -->
-        <nav class="nav-bar">
-            <button class="nav-item active" data-section="dashboard">📊 Dashboard</button>
-            <button class="nav-item" data-section="calendar">📅 Kalendarz</button>
-            <button class="nav-item" data-section="events">🎪 Wydarzenia</button>
-            <button class="nav-item" data-section="costs">💸 Koszty</button>
-            <button class="nav-item" data-section="revenues">💰 Przychody</button>
-            <button class="nav-item" data-section="receipts">🧾 Paragony</button>
-            <button class="nav-item" data-section="reports">📈 Raporty</button>
-            <button class="nav-item admin-only" data-section="users">👥 Użytkownicy</button>
-            <button class="nav-item" data-section="chat">
-                💬 Czat
-                <span id="chat-badge" class="badge">0</span>
-            </button>
-        </nav>
-
-        <!-- Main Content -->
-        <main class="main-content">
-            <!-- Dashboard Section -->
-            <section id="section-dashboard" class="section active">
-                <div class="section-header">
-                    <h2>📊 Dashboard</h2>
-                </div>
-                
-                <!-- Filters -->
-                <div class="filter-bar">
-                    <div class="filter-group">
-                        <select id="filter-year" class="form-select">
-                            <option value="">Wszystkie lata</option>
-                        </select>
-                        <select id="filter-month" class="form-select">
-                            <option value="">Wszystkie miesiące</option>
-                        </select>
-                        <button class="btn btn-small" onclick="applyFilters()">Filtruj</button>
-                        <button class="btn btn-small btn-outline" onclick="clearFilters()">Wyczyść</button>
-                    </div>
-                    <span id="current-filter-display" class="filter-display"></span>
-                </div>
-                
-                <!-- Stats -->
-                <div class="stats-grid">
-                    <div class="stat-card">
-                        <div class="stat-icon">🎪</div>
-                        <div class="stat-value" id="stat-events">0</div>
-                        <div class="stat-label">Wydarzenia</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon">💸</div>
-                        <div class="stat-value" id="stat-costs">0 zł</div>
-                        <div class="stat-label">Koszty</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon">💰</div>
-                        <div class="stat-value" id="stat-revenue">0 zł</div>
-                        <div class="stat-label">Przychody</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon">📈</div>
-                        <div class="stat-value" id="stat-profit">0 zł</div>
-                        <div class="stat-label">Zysk netto</div>
-                    </div>
-                </div>
-                
-                <!-- Recent Events -->
-                <div class="recent-section">
-                    <h3>Wydarzenia</h3>
-                    <div id="recent-events"></div>
-                </div>
-            </section>
-
-            <!-- Calendar Section -->
-            <section id="section-calendar" class="section">
-                <div class="section-header">
-                    <h2>📅 Kalendarz</h2>
-                </div>
-                <div id="calendar-container"></div>
-            </section>
-
-            <!-- Events Section -->
-            <section id="section-events" class="section">
-                <div class="section-header">
-                    <h2>🎪 Wydarzenia</h2>
-                    <button class="btn btn-primary" onclick="showEventModal()">➕ Dodaj wydarzenie</button>
-                </div>
-                <div id="events-list"></div>
-            </section>
-
-            <!-- Costs Section -->
-            <section id="section-costs" class="section">
-                <div id="costs-content"></div>
-            </section>
-
-            <!-- Revenues Section -->
-            <section id="section-revenues" class="section">
-                <div id="revenues-content"></div>
-            </section>
-
-            <!-- Receipts Section -->
-            <section id="section-receipts" class="section">
-                <div class="section-header">
-                    <h2>🧾 Paragony</h2>
-                    <button class="btn btn-primary" onclick="showReceiptUploadModal()">📷 Dodaj paragon</button>
-                </div>
-                <div id="receipts-list"></div>
-            </section>
-
-            <!-- Reports Section -->
-            <section id="section-reports" class="section">
-                <div class="section-header">
-                    <h2>📈 Raporty</h2>
-                </div>
-                <div id="reports-content"></div>
-            </section>
-
-            <!-- Users Section -->
-            <section id="section-users" class="section admin-only">
-                <div class="section-header">
-                    <h2>👥 Zarządzanie użytkownikami</h2>
-                    <button class="btn btn-primary" onclick="showUserModal()">➕ Dodaj użytkownika</button>
-                </div>
-                <div class="info-box">
-                    💡 <strong>Uprawnienia:</strong> Właściciel może zarządzać wszystkimi użytkownikami. 
-                    Manager może dodawać i edytować tylko pracowników.
-                </div>
-                <div id="users-list"></div>
-            </section>
-
-            <!-- Chat Section -->
-            <section id="section-chat" class="section">
-                <div class="section-header">
-                    <h2>💬 Czat zespołu</h2>
-                </div>
-                <div class="chat-container">
-                    <div class="chat-sidebar">
-                        <h4>Online</h4>
-                        <div id="online-users"></div>
-                    </div>
-                    <div class="chat-main">
-                        <div id="chat-messages" class="chat-messages"></div>
-                        <div id="typing-indicator" class="typing-indicator"></div>
-                        <div class="chat-input-area">
-                            <input type="text" id="chat-input" placeholder="Napisz wiadomość..." maxlength="2000">
-                            <button id="chat-send" class="btn btn-primary">Wyślij</button>
-                        </div>
-                    </div>
-                </div>
-            </section>
-        </main>
-    </div>
-
-    <!-- Toast Container -->
-    <div id="toast-container"></div>
-
+    
+    <!-- Application Script -->
     <script src="/app/app.js"></script>
 </body>
 </html>

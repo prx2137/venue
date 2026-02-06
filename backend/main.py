@@ -1201,6 +1201,22 @@ async def get_chat_messages(
     return result
 
 
+@app.get("/api/chat/history")
+async def get_chat_history(
+    limit: int = 100,
+    recipient_id: Optional[int] = None,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Alias for get_chat_messages - for backwards compatibility"""
+    return await get_chat_messages(
+        recipient_id=recipient_id,
+        limit=limit,
+        current_user=current_user,
+        db=db
+    )
+
+
 @app.get("/api/chat/online")
 async def get_online_users(
     current_user: models.User = Depends(get_current_user),
