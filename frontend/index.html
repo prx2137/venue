@@ -14,226 +14,199 @@
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎵</text></svg>">
 </head>
 <body>
-    <div id="app">
-        <!-- Login Screen -->
-        <div id="login-screen" class="screen active">
-            <div class="login-container">
-                <div class="login-header">
-                    <div class="logo">🎵</div>
-                    <h1>Music Venue</h1>
-                    <p>System Zarządzania Klubem</p>
-                </div>
-                <form id="login-form" class="login-form">
-                    <div class="form-group">
-                        <label for="login-email">Email</label>
-                        <input type="email" id="login-email" placeholder="twoj@email.com" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="login-password">Hasło</label>
-                        <input type="password" id="login-password" placeholder="••••••••" required>
-                    </div>
-                    <button type="submit" class="btn btn-primary btn-block">
-                        <span>Zaloguj się</span>
-                    </button>
-                </form>
-                <div id="login-error" class="error-message"></div>
+    <!-- Login Screen -->
+    <div id="login-screen" class="login-screen">
+        <div class="login-container">
+            <div class="login-header">
+                <div class="logo">🎵</div>
+                <h1>Music Venue</h1>
+                <p>System Zarządzania Klubem</p>
             </div>
+            <form id="login-form" class="login-form">
+                <div class="form-group">
+                    <label>Email</label>
+                    <input type="email" name="email" placeholder="twoj@email.com" required>
+                </div>
+                <div class="form-group">
+                    <label>Hasło</label>
+                    <input type="password" name="password" placeholder="••••••••" required>
+                </div>
+                <button type="submit" class="btn btn-primary btn-block">
+                    Zaloguj się
+                </button>
+            </form>
         </div>
-
-        <!-- Main App -->
-        <div id="main-app" class="screen">
-            <!-- Header -->
-            <header class="app-header">
-                <div class="header-left">
-                    <button id="menu-toggle" class="menu-btn">☰</button>
-                    <h1 class="app-title">🎵 Music Venue</h1>
-                </div>
-                <div class="header-right">
-                    <button id="chat-toggle" class="chat-btn" title="Czat zespołu">
-                        💬
-                        <span id="chat-badge" class="badge hidden">0</span>
-                    </button>
-                    <div class="user-info">
-                        <span id="user-name">Użytkownik</span>
-                        <button id="logout-btn" class="btn btn-small">Wyloguj</button>
-                    </div>
-                </div>
-            </header>
-
-            <!-- Sidebar -->
-            <nav id="sidebar" class="sidebar">
-                <div class="sidebar-header">
-                    <span id="user-role-badge" class="role-badge">Pracownik</span>
-                </div>
-                <ul class="nav-menu">
-                    <li><a href="#" data-view="dashboard" class="nav-item active">📊 Dashboard</a></li>
-                    <li><a href="#" data-view="events" class="nav-item">🎪 Wydarzenia</a></li>
-                    <li><a href="#" data-view="costs" class="nav-item">💸 Koszty</a></li>
-                    <li><a href="#" data-view="revenue" class="nav-item">💰 Przychody</a></li>
-                    <li><a href="#" data-view="receipts" class="nav-item">🧾 Paragony</a></li>
-                    <li><a href="#" data-view="reports" class="nav-item">📈 Raporty</a></li>
-                    <li id="users-nav" class="hidden"><a href="#" data-view="users" class="nav-item">👥 Użytkownicy</a></li>
-                </ul>
-            </nav>
-
-            <!-- Main Content -->
-            <main id="main-content" class="main-content">
-                <!-- Dashboard View -->
-                <div id="dashboard-view" class="view active">
-                    <div class="view-header">
-                        <h2>📊 Dashboard</h2>
-                    </div>
-                    <div class="stats-grid">
-                        <div class="stat-card">
-                            <div class="stat-icon">🎪</div>
-                            <div class="stat-info">
-                                <span class="stat-value" id="total-events">0</span>
-                                <span class="stat-label">Wydarzenia</span>
-                            </div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-icon">💸</div>
-                            <div class="stat-info">
-                                <span class="stat-value" id="total-costs">0 zł</span>
-                                <span class="stat-label">Koszty</span>
-                            </div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-icon">💰</div>
-                            <div class="stat-info">
-                                <span class="stat-value" id="total-revenue">0 zł</span>
-                                <span class="stat-label">Przychody</span>
-                            </div>
-                        </div>
-                        <div class="stat-card profit">
-                            <div class="stat-icon">📈</div>
-                            <div class="stat-info">
-                                <span class="stat-value" id="total-profit">0 zł</span>
-                                <span class="stat-label">Zysk netto</span>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="recent-section">
-                        <h3>Ostatnie wydarzenia</h3>
-                        <div id="recent-events" class="card-list"></div>
-                    </div>
-                </div>
-
-                <!-- Events View -->
-                <div id="events-view" class="view">
-                    <div class="view-header">
-                        <h2>🎪 Wydarzenia</h2>
-                        <button id="add-event-btn" class="btn btn-primary">+ Dodaj</button>
-                    </div>
-                    <div id="events-list" class="card-list"></div>
-                </div>
-
-                <!-- Costs View -->
-                <div id="costs-view" class="view">
-                    <div class="view-header">
-                        <h2>💸 Koszty</h2>
-                        <button id="add-cost-btn" class="btn btn-primary">+ Dodaj</button>
-                    </div>
-                    <div class="filter-bar">
-                        <select id="cost-event-filter" class="form-select">
-                            <option value="">Wszystkie wydarzenia</option>
-                        </select>
-                    </div>
-                    <div id="costs-list" class="card-list"></div>
-                </div>
-
-                <!-- Revenue View -->
-                <div id="revenue-view" class="view">
-                    <div class="view-header">
-                        <h2>💰 Przychody</h2>
-                        <button id="add-revenue-btn" class="btn btn-primary">+ Dodaj</button>
-                    </div>
-                    <div class="filter-bar">
-                        <select id="revenue-event-filter" class="form-select">
-                            <option value="">Wszystkie wydarzenia</option>
-                        </select>
-                    </div>
-                    <div id="revenue-list" class="card-list"></div>
-                </div>
-
-                <!-- Receipts View -->
-                <div id="receipts-view" class="view">
-                    <div class="view-header">
-                        <h2>🧾 Paragony</h2>
-                        <button id="add-receipt-btn" class="btn btn-primary">+ Dodaj paragon</button>
-                    </div>
-                    <div id="receipts-list" class="card-list"></div>
-                </div>
-
-                <!-- Reports View -->
-                <div id="reports-view" class="view">
-                    <div class="view-header">
-                        <h2>📈 Raporty</h2>
-                    </div>
-                    <div class="report-filters">
-                        <div class="form-group">
-                            <label>Wybierz wydarzenie</label>
-                            <select id="report-event-select" class="form-select">
-                                <option value="">Wybierz...</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div id="report-content" class="report-content"></div>
-                </div>
-
-                <!-- Users View -->
-                <div id="users-view" class="view">
-                    <div class="view-header">
-                        <h2>👥 Zarządzanie użytkownikami</h2>
-                        <button id="add-user-btn" class="btn btn-primary">+ Dodaj użytkownika</button>
-                    </div>
-                    <div class="users-info-box">
-                        <p>💡 <strong>Uprawnienia:</strong> Właściciel może zarządzać wszystkimi użytkownikami. Manager może dodawać i edytować tylko pracowników.</p>
-                    </div>
-                    <div id="users-list" class="card-list"></div>
-                </div>
-            </main>
-
-            <!-- Chat Panel -->
-            <aside id="chat-panel" class="chat-panel">
-                <div class="chat-header">
-                    <h3>💬 Czat zespołu</h3>
-                    <button id="chat-close" class="chat-close">✕</button>
-                </div>
-                <div class="chat-users">
-                    <div class="users-header">
-                        <span>Online</span>
-                        <span id="online-count" class="online-count">0</span>
-                    </div>
-                    <div id="users-online" class="users-list"></div>
-                </div>
-                <div id="chat-messages" class="chat-messages"></div>
-                <div id="typing-indicator" class="typing-indicator hidden">
-                    <span id="typing-user"></span> pisze...
-                </div>
-                <form id="chat-form" class="chat-input">
-                    <input type="text" id="chat-input" placeholder="Napisz wiadomość..." maxlength="2000" autocomplete="off">
-                    <button type="submit" class="btn btn-primary">➤</button>
-                </form>
-            </aside>
-        </div>
-
-        <!-- Modal -->
-        <div id="modal" class="modal">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h3 id="modal-title">Tytuł</h3>
-                    <button class="modal-close">&times;</button>
-                </div>
-                <div id="modal-body" class="modal-body"></div>
-            </div>
-        </div>
-
-        <!-- Toast Notifications -->
-        <div id="toast-container" class="toast-container"></div>
     </div>
 
-    <script src="/app/config.js"></script>
+    <!-- Main App -->
+    <div id="app" style="display: none;">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="header-left">
+                <span class="app-title">🎵 Music Venue</span>
+            </div>
+            <div class="header-right">
+                <div class="user-info">
+                    <span id="user-name">Użytkownik</span>
+                    <span id="user-role" class="user-role">Pracownik</span>
+                </div>
+                <button id="logout-btn" class="btn btn-small">Wyloguj</button>
+            </div>
+        </header>
+
+        <!-- Navigation -->
+        <nav class="nav-bar">
+            <button class="nav-item active" data-section="dashboard">📊 Dashboard</button>
+            <button class="nav-item" data-section="calendar">📅 Kalendarz</button>
+            <button class="nav-item" data-section="events">🎪 Wydarzenia</button>
+            <button class="nav-item" data-section="costs">💸 Koszty</button>
+            <button class="nav-item" data-section="revenues">💰 Przychody</button>
+            <button class="nav-item" data-section="receipts">🧾 Paragony</button>
+            <button class="nav-item" data-section="reports">📈 Raporty</button>
+            <button class="nav-item admin-only" data-section="users">👥 Użytkownicy</button>
+            <button class="nav-item" data-section="chat">
+                💬 Czat
+                <span id="chat-badge" class="badge">0</span>
+            </button>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Dashboard Section -->
+            <section id="section-dashboard" class="section active">
+                <div class="section-header">
+                    <h2>📊 Dashboard</h2>
+                </div>
+                
+                <!-- Filters -->
+                <div class="filter-bar">
+                    <div class="filter-group">
+                        <select id="filter-year" class="form-select">
+                            <option value="">Wszystkie lata</option>
+                        </select>
+                        <select id="filter-month" class="form-select">
+                            <option value="">Wszystkie miesiące</option>
+                        </select>
+                        <button class="btn btn-small" onclick="applyFilters()">Filtruj</button>
+                        <button class="btn btn-small btn-outline" onclick="clearFilters()">Wyczyść</button>
+                    </div>
+                    <span id="current-filter-display" class="filter-display"></span>
+                </div>
+                
+                <!-- Stats -->
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon">🎪</div>
+                        <div class="stat-value" id="stat-events">0</div>
+                        <div class="stat-label">Wydarzenia</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">💸</div>
+                        <div class="stat-value" id="stat-costs">0 zł</div>
+                        <div class="stat-label">Koszty</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">💰</div>
+                        <div class="stat-value" id="stat-revenue">0 zł</div>
+                        <div class="stat-label">Przychody</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon">📈</div>
+                        <div class="stat-value" id="stat-profit">0 zł</div>
+                        <div class="stat-label">Zysk netto</div>
+                    </div>
+                </div>
+                
+                <!-- Recent Events -->
+                <div class="recent-section">
+                    <h3>Wydarzenia</h3>
+                    <div id="recent-events"></div>
+                </div>
+            </section>
+
+            <!-- Calendar Section -->
+            <section id="section-calendar" class="section">
+                <div class="section-header">
+                    <h2>📅 Kalendarz</h2>
+                </div>
+                <div id="calendar-container"></div>
+            </section>
+
+            <!-- Events Section -->
+            <section id="section-events" class="section">
+                <div class="section-header">
+                    <h2>🎪 Wydarzenia</h2>
+                    <button class="btn btn-primary" onclick="showEventModal()">➕ Dodaj wydarzenie</button>
+                </div>
+                <div id="events-list"></div>
+            </section>
+
+            <!-- Costs Section -->
+            <section id="section-costs" class="section">
+                <div id="costs-content"></div>
+            </section>
+
+            <!-- Revenues Section -->
+            <section id="section-revenues" class="section">
+                <div id="revenues-content"></div>
+            </section>
+
+            <!-- Receipts Section -->
+            <section id="section-receipts" class="section">
+                <div class="section-header">
+                    <h2>🧾 Paragony</h2>
+                    <button class="btn btn-primary" onclick="showReceiptUploadModal()">📷 Dodaj paragon</button>
+                </div>
+                <div id="receipts-list"></div>
+            </section>
+
+            <!-- Reports Section -->
+            <section id="section-reports" class="section">
+                <div class="section-header">
+                    <h2>📈 Raporty</h2>
+                </div>
+                <div id="reports-content"></div>
+            </section>
+
+            <!-- Users Section -->
+            <section id="section-users" class="section admin-only">
+                <div class="section-header">
+                    <h2>👥 Zarządzanie użytkownikami</h2>
+                    <button class="btn btn-primary" onclick="showUserModal()">➕ Dodaj użytkownika</button>
+                </div>
+                <div class="info-box">
+                    💡 <strong>Uprawnienia:</strong> Właściciel może zarządzać wszystkimi użytkownikami. 
+                    Manager może dodawać i edytować tylko pracowników.
+                </div>
+                <div id="users-list"></div>
+            </section>
+
+            <!-- Chat Section -->
+            <section id="section-chat" class="section">
+                <div class="section-header">
+                    <h2>💬 Czat zespołu</h2>
+                </div>
+                <div class="chat-container">
+                    <div class="chat-sidebar">
+                        <h4>Online</h4>
+                        <div id="online-users"></div>
+                    </div>
+                    <div class="chat-main">
+                        <div id="chat-messages" class="chat-messages"></div>
+                        <div id="typing-indicator" class="typing-indicator"></div>
+                        <div class="chat-input-area">
+                            <input type="text" id="chat-input" placeholder="Napisz wiadomość..." maxlength="2000">
+                            <button id="chat-send" class="btn btn-primary">Wyślij</button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Toast Container -->
+    <div id="toast-container"></div>
+
     <script src="/app/app.js"></script>
 </body>
 </html>
