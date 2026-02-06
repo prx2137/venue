@@ -4,131 +4,229 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="theme-color" content="#6366f1">
-    <meta name="description" content="System zarządzania finansami klubu muzycznego">
-    <title>🎵 Music Venue Manager</title>
-    <link rel="stylesheet" href="styles.css">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>🎵 Music Venue - System Zarządzania</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <!-- LOGIN PAGE -->
-    <div id="loginPage" class="login-page">
-        <div class="login-container">
-            <div class="login-header">
-                <h1>🎵 Music Venue</h1>
-                <p>System zarządzania klubem muzycznym</p>
-            </div>
-            
-            <div class="login-tabs">
-                <button id="loginTab" class="tab-btn active">Logowanie</button>
-                <button id="registerTab" class="tab-btn">Rejestracja</button>
-            </div>
-            
-            <form id="loginForm" class="auth-form">
-                <div class="form-group">
-                    <label for="email">Email</label>
-                    <input type="email" id="email" name="email" required placeholder="jan@example.com">
+    <div id="app">
+        <!-- Login Screen -->
+        <div id="login-screen" class="screen active">
+            <div class="login-container">
+                <div class="login-header">
+                    <div class="logo">🎵</div>
+                    <h1>Music Venue</h1>
+                    <p>System Zarządzania Klubem</p>
                 </div>
-                <div class="form-group">
-                    <label for="password">Hasło</label>
-                    <input type="password" id="password" name="password" required placeholder="••••••••">
-                </div>
-                <button type="submit" class="btn btn-primary btn-block">Zaloguj się</button>
-            </form>
-            
-            <form id="registerForm" class="auth-form" style="display: none;">
-                <div class="form-group">
-                    <label for="regFullName">Imię i nazwisko</label>
-                    <input type="text" id="regFullName" name="fullName" required placeholder="Jan Kowalski">
-                </div>
-                <div class="form-group">
-                    <label for="regEmail">Email</label>
-                    <input type="email" id="regEmail" name="email" required placeholder="jan@example.com">
-                </div>
-                <div class="form-group">
-                    <label for="regPassword">Hasło</label>
-                    <input type="password" id="regPassword" name="password" required minlength="8" placeholder="Min. 8 znaków">
-                </div>
-                <button type="submit" class="btn btn-primary btn-block">Zarejestruj się</button>
-            </form>
-            
-            <div class="login-footer">
-                <p>Demo: <code>admin@venue.com</code> / <code>Admin123!</code></p>
+                <form id="login-form" class="login-form">
+                    <div class="form-group">
+                        <label for="login-email">Email</label>
+                        <input type="email" id="login-email" placeholder="twoj@email.com" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="login-password">Hasło</label>
+                        <input type="password" id="login-password" placeholder="••••••••" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-block">
+                        <span>Zaloguj się</span>
+                    </button>
+                </form>
+                <div id="login-error" class="error-message"></div>
             </div>
         </div>
-    </div>
 
-    <!-- MAIN APP -->
-    <div id="appPage" class="app-page" style="display: none;">
-        <!-- Sidebar -->
-        <aside class="sidebar">
-            <div class="sidebar-header">
-                <h2>🎵 Venue</h2>
-            </div>
-            
-            <nav class="sidebar-nav">
-                <div class="nav-item active" data-view="dashboard">
-                    <span class="nav-icon">📊</span>
-                    <span class="nav-label">Panel główny</span>
+        <!-- Main App -->
+        <div id="main-app" class="screen">
+            <!-- Header -->
+            <header class="app-header">
+                <div class="header-left">
+                    <button id="menu-toggle" class="menu-btn">☰</button>
+                    <h1 class="app-title">🎵 Music Venue</h1>
                 </div>
-                <div class="nav-item" data-view="events">
-                    <span class="nav-icon">🎵</span>
-                    <span class="nav-label">Wydarzenia</span>
+                <div class="header-right">
+                    <button id="chat-toggle" class="chat-btn" title="Czat zespołu">
+                        💬
+                        <span id="chat-badge" class="badge hidden">0</span>
+                    </button>
+                    <div class="user-info">
+                        <span id="user-name">Użytkownik</span>
+                        <button id="logout-btn" class="btn btn-small">Wyloguj</button>
+                    </div>
                 </div>
-                <div class="nav-item" data-view="costs">
-                    <span class="nav-icon">💸</span>
-                    <span class="nav-label">Koszty</span>
+            </header>
+
+            <!-- Sidebar -->
+            <nav id="sidebar" class="sidebar">
+                <div class="sidebar-header">
+                    <span id="user-role-badge" class="role-badge">Pracownik</span>
                 </div>
-                <div class="nav-item" data-view="receipts">
-                    <span class="nav-icon">📷</span>
-                    <span class="nav-label">Paragony</span>
-                </div>
-                <div class="nav-item" data-view="revenue">
-                    <span class="nav-icon">💰</span>
-                    <span class="nav-label">Przychody</span>
-                </div>
-                <div class="nav-item admin-only" data-view="reports">
-                    <span class="nav-icon">📈</span>
-                    <span class="nav-label">Raporty</span>
-                </div>
-                <div class="nav-item admin-only" data-view="users">
-                    <span class="nav-icon">👥</span>
-                    <span class="nav-label">Użytkownicy</span>
-                </div>
+                <ul class="nav-menu">
+                    <li><a href="#" data-view="dashboard" class="nav-item active">📊 Dashboard</a></li>
+                    <li><a href="#" data-view="events" class="nav-item">🎪 Wydarzenia</a></li>
+                    <li><a href="#" data-view="costs" class="nav-item">💸 Koszty</a></li>
+                    <li><a href="#" data-view="revenue" class="nav-item">💰 Przychody</a></li>
+                    <li><a href="#" data-view="receipts" class="nav-item">🧾 Paragony</a></li>
+                    <li><a href="#" data-view="reports" class="nav-item">📈 Raporty</a></li>
+                    <li id="users-nav" class="hidden"><a href="#" data-view="users" class="nav-item">👥 Użytkownicy</a></li>
+                </ul>
             </nav>
-            
-            <div class="sidebar-footer">
-                <div class="user-info">
-                    <span id="userName">Użytkownik</span>
-                    <small id="userRole">Pracownik</small>
+
+            <!-- Main Content -->
+            <main id="main-content" class="main-content">
+                <!-- Dashboard View -->
+                <div id="dashboard-view" class="view active">
+                    <div class="view-header">
+                        <h2>📊 Dashboard</h2>
+                    </div>
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <div class="stat-icon">🎪</div>
+                            <div class="stat-info">
+                                <span class="stat-value" id="total-events">0</span>
+                                <span class="stat-label">Wydarzenia</span>
+                            </div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-icon">💸</div>
+                            <div class="stat-info">
+                                <span class="stat-value" id="total-costs">0 zł</span>
+                                <span class="stat-label">Koszty</span>
+                            </div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-icon">💰</div>
+                            <div class="stat-info">
+                                <span class="stat-value" id="total-revenue">0 zł</span>
+                                <span class="stat-label">Przychody</span>
+                            </div>
+                        </div>
+                        <div class="stat-card profit">
+                            <div class="stat-icon">📈</div>
+                            <div class="stat-info">
+                                <span class="stat-value" id="total-profit">0 zł</span>
+                                <span class="stat-label">Zysk netto</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="recent-section">
+                        <h3>Ostatnie wydarzenia</h3>
+                        <div id="recent-events" class="card-list"></div>
+                    </div>
                 </div>
-                <button class="btn btn-sm" onclick="logout()">Wyloguj</button>
-            </div>
-        </aside>
 
-        <!-- Main Content -->
-        <main class="main-content" id="mainContent">
-            <div class="loading">Ładowanie...</div>
-        </main>
+                <!-- Events View -->
+                <div id="events-view" class="view">
+                    <div class="view-header">
+                        <h2>🎪 Wydarzenia</h2>
+                        <button id="add-event-btn" class="btn btn-primary">+ Dodaj</button>
+                    </div>
+                    <div id="events-list" class="card-list"></div>
+                </div>
 
-        <!-- Mobile Bottom Nav -->
-        <nav class="mobile-nav">
-            <div class="mobile-nav-item" data-view="dashboard">📊</div>
-            <div class="mobile-nav-item" data-view="events">🎵</div>
-            <div class="mobile-nav-item" data-view="costs">💸</div>
-            <div class="mobile-nav-item" data-view="receipts">📷</div>
-            <div class="mobile-nav-item" data-view="revenue">💰</div>
-        </nav>
-    </div>
+                <!-- Costs View -->
+                <div id="costs-view" class="view">
+                    <div class="view-header">
+                        <h2>💸 Koszty</h2>
+                        <button id="add-cost-btn" class="btn btn-primary">+ Dodaj</button>
+                    </div>
+                    <div class="filter-bar">
+                        <select id="cost-event-filter" class="form-select">
+                            <option value="">Wszystkie wydarzenia</option>
+                        </select>
+                    </div>
+                    <div id="costs-list" class="card-list"></div>
+                </div>
 
-    <!-- Modal -->
-    <div id="modal" class="modal">
-        <div class="modal-content" id="modalContent">
+                <!-- Revenue View -->
+                <div id="revenue-view" class="view">
+                    <div class="view-header">
+                        <h2>💰 Przychody</h2>
+                        <button id="add-revenue-btn" class="btn btn-primary">+ Dodaj</button>
+                    </div>
+                    <div class="filter-bar">
+                        <select id="revenue-event-filter" class="form-select">
+                            <option value="">Wszystkie wydarzenia</option>
+                        </select>
+                    </div>
+                    <div id="revenue-list" class="card-list"></div>
+                </div>
+
+                <!-- Receipts View -->
+                <div id="receipts-view" class="view">
+                    <div class="view-header">
+                        <h2>🧾 Paragony</h2>
+                        <button id="add-receipt-btn" class="btn btn-primary">+ Dodaj paragon</button>
+                    </div>
+                    <div id="receipts-list" class="card-list"></div>
+                </div>
+
+                <!-- Reports View -->
+                <div id="reports-view" class="view">
+                    <div class="view-header">
+                        <h2>📈 Raporty</h2>
+                    </div>
+                    <div class="report-filters">
+                        <div class="form-group">
+                            <label>Wybierz wydarzenie</label>
+                            <select id="report-event-select" class="form-select">
+                                <option value="">Wybierz...</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="report-content" class="report-content"></div>
+                </div>
+
+                <!-- Users View -->
+                <div id="users-view" class="view">
+                    <div class="view-header">
+                        <h2>👥 Użytkownicy</h2>
+                    </div>
+                    <div id="users-list" class="card-list"></div>
+                </div>
+            </main>
+
+            <!-- Chat Panel -->
+            <aside id="chat-panel" class="chat-panel">
+                <div class="chat-header">
+                    <h3>💬 Czat zespołu</h3>
+                    <button id="chat-close" class="chat-close">✕</button>
+                </div>
+                <div class="chat-users">
+                    <div class="users-header">
+                        <span>Online</span>
+                        <span id="online-count" class="online-count">0</span>
+                    </div>
+                    <div id="users-online" class="users-list"></div>
+                </div>
+                <div id="chat-messages" class="chat-messages"></div>
+                <div id="typing-indicator" class="typing-indicator hidden">
+                    <span id="typing-user"></span> pisze...
+                </div>
+                <form id="chat-form" class="chat-input">
+                    <input type="text" id="chat-input" placeholder="Napisz wiadomość..." maxlength="2000" autocomplete="off">
+                    <button type="submit" class="btn btn-primary">➤</button>
+                </form>
+            </aside>
         </div>
-    </div>
 
-    <!-- Toast container -->
-    <div id="toastContainer"></div>
+        <!-- Modal -->
+        <div id="modal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3 id="modal-title">Tytuł</h3>
+                    <button class="modal-close">&times;</button>
+                </div>
+                <div id="modal-body" class="modal-body"></div>
+            </div>
+        </div>
+
+        <!-- Toast Notifications -->
+        <div id="toast-container" class="toast-container"></div>
+    </div>
 
     <script src="config.js"></script>
     <script src="app.js"></script>

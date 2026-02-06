@@ -1,78 +1,86 @@
 """
 Pydantic Schemas for Music Venue Management System
-Extended with Receipts and OCR support
+With Receipt OCR and Live Chat support
 """
 
-from datetime import datetime
-from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, EmailStr, field_validator, model_validator
+from typing import Optional, List, Dict, Any
+from datetime import datetime
 from enum import Enum
 
 
 # ==================== ENUMS ====================
 
-class CostCategoryEnum(str, Enum):
-    bar_alcohol = "bar_alcohol"
-    bar_beverages = "bar_beverages"
-    bar_food = "bar_food"
-    bar_supplies = "bar_supplies"
-    staff_wages = "staff_wages"
-    equipment_rental = "equipment_rental"
-    marketing = "marketing"
-    utilities = "utilities"
-    maintenance = "maintenance"
-    cleaning = "cleaning"
-    security = "security"
-    artist_fee = "artist_fee"
-    sound_engineer = "sound_engineer"
-    lighting = "lighting"
-    licenses = "licenses"
-    insurance = "insurance"
-    other = "other"
+class UserRole(str, Enum):
+    OWNER = "owner"
+    MANAGER = "manager"
+    WORKER = "worker"
 
 
-class RevenueSourceEnum(str, Enum):
-    box_office = "box_office"
-    bar_sales = "bar_sales"
-    merchandise = "merchandise"
-    sponsorship = "sponsorship"
-    rental = "rental"
-    other = "other"
+class CostCategory(str, Enum):
+    BAR_ALCOHOL = "bar_alcohol"
+    BAR_BEVERAGES = "bar_beverages"
+    BAR_FOOD = "bar_food"
+    BAR_SUPPLIES = "bar_supplies"
+    ARTIST_FEE = "artist_fee"
+    SOUND_ENGINEER = "sound_engineer"
+    LIGHTING = "lighting"
+    STAFF_WAGES = "staff_wages"
+    SECURITY = "security"
+    CLEANING = "cleaning"
+    UTILITIES = "utilities"
+    RENT = "rent"
+    EQUIPMENT = "equipment"
+    MARKETING = "marketing"
+    OTHER = "other"
 
 
-class ReceiptStatusEnum(str, Enum):
-    pending = "pending"
-    processing = "processing"
-    processed = "processed"
-    verified = "verified"
-    rejected = "rejected"
+class RevenueSource(str, Enum):
+    BOX_OFFICE = "box_office"
+    BAR_SALES = "bar_sales"
+    MERCHANDISE = "merchandise"
+    SPONSORSHIP = "sponsorship"
+    OTHER = "other"
 
 
-# ==================== USER SCHEMAS ====================
+class ReceiptStatus(str, Enum):
+    PENDING = "pending"
+    PROCESSED = "processed"
+    REJECTED = "rejected"
 
-class UserCreate(BaseModel):
-    email: EmailStr
-    password: str
-    full_name: str
-    role: Optional[str] = "worker"
-    
-    @field_validator('password')
-    @classmethod
-    def validate_password(cls, v):
-        if len(v) < 8:
-            raise ValueError('Hasło musi mieć minimum 8 znaków')
-        return v
 
+class MessageType(str, Enum):
+    TEXT = "text"
+    SYSTEM = "system"
+    ANNOUNCEMENT = "announcement"
+
+
+# ==================== AUTH ====================
 
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
 
 
-class UserUpdate(BaseModel):
-    full_name: Optional[str] = None
-    role: Optional[str] = None
-    is_active: Optional[bool] = None
+class UserRegister(BaseModel):
+    email: EmailStr
+    password: str
+    full_name: str
+    role: UserRole = UserRole.WORKER
+    
+    @field_validator('password')
+    @classmethod
+    def password_strength(cls, v):
+        if len(v) < 6:
+            raise ValueError('Hasło musi mieć minimum 6 znaków')
+        return v
+    
+    @field_validator('full_name')
+    @classmethod
+    def name_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Imię i nazwisko jest wymagane')
+        return v.strip()
 
 
 class UserResponse(BaseModel):
@@ -86,207 +94,252 @@ class UserResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class UserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    role: Optional[UserRole] = None
+    is_active: Optional[bool] = None
+
+
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserResponse
 
 
-# ==================== EVENT SCHEMAS ====================
+# ==================== EVENTS ====================
 
 class EventCreate(BaseModel):
     name: str
-    date: datetime
     description: Optional[str] = None
-    capacity: Optional[int] = None
-    ticket_price: Optional[float] = None
-    status: Optional[str] = "planned"
+    event_date: datetime
+    venue_capacity: int = 0
+    ticket_price: float = 0.0
+    
+    @field_validator('name')
+    @classmethod
+    def name_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Nazwa wydarzenia jest wymagana')
+        return v.strip()
+    
+    @field_validator('venue_capacity', 'ticket_price')
+    @classmethod
+    def non_negative(cls, v):
+        if v < 0:
+            raise ValueError('Wartość nie może być ujemna')
+        return v
 
 
 class EventUpdate(BaseModel):
     name: Optional[str] = None
-    date: Optional[datetime] = None
     description: Optional[str] = None
-    capacity: Optional[int] = None
+    event_date: Optional[datetime] = None
+    venue_capacity: Optional[int] = None
     ticket_price: Optional[float] = None
-    status: Optional[str] = None
 
 
 class EventResponse(BaseModel):
     id: int
     name: str
-    date: datetime
     description: Optional[str]
-    capacity: Optional[int]
-    ticket_price: Optional[float]
-    status: str
+    event_date: datetime
+    venue_capacity: int
+    ticket_price: float
     created_by: Optional[int]
     created_at: datetime
     
     model_config = {"from_attributes": True}
 
 
-class EventListResponse(BaseModel):
-    events: List[EventResponse]
-    total: int
-
-
-# ==================== COST SCHEMAS ====================
+# ==================== COSTS ====================
 
 class CostCreate(BaseModel):
-    event_id: Optional[int] = None  # Optional - can be general cost
-    category: CostCategoryEnum
+    event_id: int
+    category: CostCategory
     amount: float
     description: Optional[str] = None
-    vendor: Optional[str] = None
-    invoice_number: Optional[str] = None
     receipt_id: Optional[int] = None
-    cost_date: Optional[datetime] = None
     
     @field_validator('amount')
     @classmethod
-    def amount_must_be_positive(cls, v):
+    def amount_positive(cls, v):
         if v <= 0:
-            raise ValueError('Kwota musi być większa od 0')
+            raise ValueError('Kwota musi być większa od zera')
         return v
 
 
 class CostUpdate(BaseModel):
-    category: Optional[CostCategoryEnum] = None
+    category: Optional[CostCategory] = None
     amount: Optional[float] = None
     description: Optional[str] = None
-    vendor: Optional[str] = None
-    invoice_number: Optional[str] = None
-    receipt_id: Optional[int] = None
-    cost_date: Optional[datetime] = None
+    
+    @field_validator('amount')
+    @classmethod
+    def amount_positive(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError('Kwota musi być większa od zera')
+        return v
 
 
 class CostResponse(BaseModel):
     id: int
-    event_id: Optional[int]
+    event_id: int
     category: str
     amount: float
     description: Optional[str]
-    vendor: Optional[str]
-    invoice_number: Optional[str]
     receipt_id: Optional[int]
     created_by: Optional[int]
     created_at: datetime
-    cost_date: Optional[datetime]
     
     model_config = {"from_attributes": True}
 
 
-# ==================== RECEIPT SCHEMAS ====================
-
-class ReceiptUploadResponse(BaseModel):
-    id: int
-    filename: str
-    status: str
-    message: str
-
-
-class OCRItem(BaseModel):
-    name: str
-    quantity: Optional[float] = 1.0
-    unit_price: Optional[float] = None
-    total_price: Optional[float] = None
-    category_suggestion: Optional[str] = None
-
-
-class ReceiptOCRResult(BaseModel):
-    store_name: Optional[str] = None
-    receipt_date: Optional[datetime] = None
-    receipt_number: Optional[str] = None
-    items: List[OCRItem] = []
-    subtotal: Optional[float] = None
-    tax: Optional[float] = None
-    total: Optional[float] = None
-    currency: str = "PLN"
-    confidence: float = 0.0
-    raw_text: Optional[str] = None
-
-
-class ReceiptUpdate(BaseModel):
-    store_name: Optional[str] = None
-    receipt_date: Optional[datetime] = None
-    receipt_number: Optional[str] = None
-    total_amount: Optional[float] = None
-    notes: Optional[str] = None
-    status: Optional[ReceiptStatusEnum] = None
-
-
-class ReceiptResponse(BaseModel):
-    id: int
-    filename: str
-    content_type: Optional[str]
-    file_size: Optional[int]
-    store_name: Optional[str]
-    receipt_date: Optional[datetime]
-    receipt_number: Optional[str]
-    total_amount: Optional[float]
-    currency: str
-    status: str
-    ocr_confidence: Optional[float]
-    uploaded_by: Optional[int]
-    uploaded_at: datetime
-    processed_at: Optional[datetime]
-    verified_at: Optional[datetime]
-    notes: Optional[str]
-    
-    model_config = {"from_attributes": True}
-
-
-class ReceiptDetailResponse(ReceiptResponse):
-    ocr_raw_text: Optional[str]
-    ocr_items: Optional[str]  # JSON string
-
-
-class ReceiptListResponse(BaseModel):
-    receipts: List[ReceiptResponse]
-    total: int
-
-
-# ==================== REVENUE SCHEMAS ====================
+# ==================== REVENUE ====================
 
 class RevenueCreate(BaseModel):
-    event_id: Optional[int] = None
-    source: RevenueSourceEnum
+    event_id: int
+    source: RevenueSource
     amount: float
     description: Optional[str] = None
-    revenue_date: Optional[datetime] = None
     
     @field_validator('amount')
     @classmethod
-    def amount_must_be_positive(cls, v):
+    def amount_positive(cls, v):
         if v <= 0:
-            raise ValueError('Kwota musi być większa od 0')
+            raise ValueError('Kwota musi być większa od zera')
         return v
 
 
 class RevenueUpdate(BaseModel):
-    source: Optional[RevenueSourceEnum] = None
+    source: Optional[RevenueSource] = None
     amount: Optional[float] = None
     description: Optional[str] = None
-    revenue_date: Optional[datetime] = None
+    
+    @field_validator('amount')
+    @classmethod
+    def amount_positive(cls, v):
+        if v is not None and v <= 0:
+            raise ValueError('Kwota musi być większa od zera')
+        return v
 
 
 class RevenueResponse(BaseModel):
     id: int
-    event_id: Optional[int]
+    event_id: int
     source: str
     amount: float
     description: Optional[str]
     recorded_by: Optional[int]
     created_at: datetime
-    revenue_date: Optional[datetime]
     
     model_config = {"from_attributes": True}
 
 
-# ==================== REPORT SCHEMAS ====================
+# ==================== RECEIPTS ====================
 
-class ReportResponse(BaseModel):
+class ReceiptUpload(BaseModel):
+    ocr_text: str
+    
+    @field_validator('ocr_text')
+    @classmethod
+    def text_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Tekst paragonu jest wymagany')
+        return v.strip()
+
+
+class OCRItem(BaseModel):
+    name: str
+    quantity: float = 1.0
+    price: float
+    category: Optional[str] = None
+
+
+class ReceiptOCRResult(BaseModel):
+    store_name: Optional[str] = None
+    receipt_date: Optional[str] = None
+    items: List[OCRItem] = []
+    total: Optional[float] = None
+
+
+class ReceiptUploadResponse(BaseModel):
+    id: int
+    store_name: Optional[str]
+    receipt_date: Optional[datetime]
+    total_amount: Optional[float]
+    ocr_result: ReceiptOCRResult
+    status: str
+    created_at: datetime
+    
+    model_config = {"from_attributes": True}
+
+
+class ReceiptResponse(BaseModel):
+    id: int
+    store_name: Optional[str]
+    receipt_date: Optional[datetime]
+    total_amount: Optional[float]
+    status: str
+    uploaded_by: int
+    processed_by: Optional[int]
+    created_at: datetime
+    processed_at: Optional[datetime]
+    
+    model_config = {"from_attributes": True}
+
+
+class CreateCostsFromReceipt(BaseModel):
+    receipt_id: int
+    event_id: int
+    category: CostCategory = CostCategory.BAR_SUPPLIES
+
+
+# ==================== CHAT ====================
+
+class ChatMessageCreate(BaseModel):
+    content: str
+    message_type: MessageType = MessageType.TEXT
+    
+    @field_validator('content')
+    @classmethod
+    def content_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Wiadomość nie może być pusta')
+        if len(v) > 2000:
+            raise ValueError('Wiadomość może mieć maksymalnie 2000 znaków')
+        return v.strip()
+
+
+class ChatMessageResponse(BaseModel):
+    id: int
+    sender_id: int
+    sender_name: str
+    sender_role: str
+    content: str
+    message_type: str
+    is_read: bool
+    created_at: datetime
+    
+    model_config = {"from_attributes": True}
+
+
+class ChatUserStatus(BaseModel):
+    user_id: int
+    full_name: str
+    role: str
+    is_online: bool
+    last_seen: Optional[datetime] = None
+
+
+class ChatHistoryResponse(BaseModel):
+    messages: List[ChatMessageResponse]
+    users_online: List[ChatUserStatus]
+    total_unread: int
+
+
+# ==================== REPORTS ====================
+
+class EventReport(BaseModel):
     event_id: int
     event_name: str
     event_date: datetime
@@ -298,7 +351,7 @@ class ReportResponse(BaseModel):
     revenue_breakdown: Dict[str, float]
 
 
-class PeriodReportResponse(BaseModel):
+class PeriodReport(BaseModel):
     period_from: datetime
     period_to: datetime
     events_count: int
@@ -308,37 +361,15 @@ class PeriodReportResponse(BaseModel):
     profit_margin: float
 
 
-class CategoryBreakdown(BaseModel):
-    category: str
-    label: str
-    amount: float
-    percentage: float
-    count: int
+# ==================== CATEGORIES ====================
+
+class CategoriesResponse(BaseModel):
+    cost_categories: Dict[str, str]
+    revenue_sources: Dict[str, str]
 
 
-class DetailedReportResponse(BaseModel):
-    period_from: datetime
-    period_to: datetime
-    events_count: int
-    total_costs: float
-    total_revenue: float
-    net_profit: float
-    profit_margin: float
-    costs_by_category: List[CategoryBreakdown]
-    revenue_by_source: List[CategoryBreakdown]
-    top_expenses: List[CostResponse]
-    receipts_summary: Dict[str, Any]
-
-
-# ==================== UTILITY SCHEMAS ====================
+# ==================== GENERAL ====================
 
 class MessageResponse(BaseModel):
     message: str
     detail: Optional[str] = None
-
-
-class CategoriesResponse(BaseModel):
-    cost_categories: List[Dict[str, str]]
-    revenue_sources: List[Dict[str, str]]
-    user_roles: List[Dict[str, str]]
-    receipt_statuses: List[Dict[str, str]]

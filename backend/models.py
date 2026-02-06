@@ -1,63 +1,56 @@
 """
 SQLAlchemy ORM Models for Music Venue Management System
-Extended with Receipts and OCR support
+With Receipt OCR support and Live Chat
 """
 
-from datetime import datetime
-from enum import Enum
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Boolean, Text, LargeBinary
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Text, Enum, Boolean
 from sqlalchemy.orm import relationship
+from datetime import datetime
+import enum
+
 from database import Base
 
 
-class UserRole(str, Enum):
-    owner = "owner"
-    manager = "manager"
-    worker = "worker"
+class UserRole(str, enum.Enum):
+    OWNER = "owner"
+    MANAGER = "manager"
+    WORKER = "worker"
 
 
-class CostCategory(str, Enum):
-    # Bar & Inventory
-    bar_alcohol = "bar_alcohol"
-    bar_beverages = "bar_beverages"
-    bar_food = "bar_food"
-    bar_supplies = "bar_supplies"
-    
+class CostCategory(str, enum.Enum):
+    # Bar & Supplies
+    BAR_ALCOHOL = "bar_alcohol"
+    BAR_BEVERAGES = "bar_beverages"
+    BAR_FOOD = "bar_food"
+    BAR_SUPPLIES = "bar_supplies"
+    # Artists & Performance
+    ARTIST_FEE = "artist_fee"
+    SOUND_ENGINEER = "sound_engineer"
+    LIGHTING = "lighting"
     # Operations
-    staff_wages = "staff_wages"
-    equipment_rental = "equipment_rental"
-    marketing = "marketing"
-    utilities = "utilities"
-    maintenance = "maintenance"
-    cleaning = "cleaning"
-    security = "security"
-    
-    # Artists & Events
-    artist_fee = "artist_fee"
-    sound_engineer = "sound_engineer"
-    lighting = "lighting"
-    
+    STAFF_WAGES = "staff_wages"
+    SECURITY = "security"
+    CLEANING = "cleaning"
+    UTILITIES = "utilities"
+    RENT = "rent"
+    EQUIPMENT = "equipment"
+    MARKETING = "marketing"
     # Other
-    licenses = "licenses"
-    insurance = "insurance"
-    other = "other"
+    OTHER = "other"
 
 
-class RevenueSource(str, Enum):
-    box_office = "box_office"
-    bar_sales = "bar_sales"
-    merchandise = "merchandise"
-    sponsorship = "sponsorship"
-    rental = "rental"
-    other = "other"
+class RevenueSource(str, enum.Enum):
+    BOX_OFFICE = "box_office"
+    BAR_SALES = "bar_sales"
+    MERCHANDISE = "merchandise"
+    SPONSORSHIP = "sponsorship"
+    OTHER = "other"
 
 
-class ReceiptStatus(str, Enum):
-    pending = "pending"           # Uploaded, not processed
-    processing = "processing"     # OCR in progress
-    processed = "processed"       # OCR complete
-    verified = "verified"         # Manually verified
-    rejected = "rejected"         # Invalid receipt
+class ReceiptStatus(str, enum.Enum):
+    PENDING = "pending"
+    PROCESSED = "processed"
+    REJECTED = "rejected"
 
 
 class User(Base):
@@ -67,14 +60,21 @@ class User(Base):
     email = Column(String(255), unique=True, index=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
     full_name = Column(String(255), nullable=False)
-    role = Column(String(50), default=UserRole.worker.value)
+    role = Column(String(50), default=UserRole.WORKER.value)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    events = relationship("Event", back_populates="created_by_user")
-    costs = relationship("Cost", back_populates="created_by_user")
-    revenues = relationship("Revenue", back_populates="recorded_by_user")
-    receipts = relationship("Receipt", back_populates="uploaded_by_user")
+    # Relationships with explicit foreign_keys
+    events = relationship("Event", back_populates="created_by_user", foreign_keys="Event.created_by")
+    costs = relationship("Cost", back_populates="created_by_user", foreign_keys="Cost.created_by")
+    revenues = relationship("Revenue", back_populates="recorded_by_user", foreign_keys="Revenue.recorded_by")
+    
+    # Receipt relationships - specify foreign_keys to avoid ambiguity
+    uploaded_receipts = relationship("Receipt", back_populates="uploader", foreign_keys="Receipt.uploaded_by")
+    processed_receipts = relationship("Receipt", back_populates="processor", foreign_keys="Receipt.processed_by")
+    
+    # Chat relationships
+    sent_messages = relationship("ChatMessage", back_populates="sender", foreign_keys="ChatMessage.sender_id")
 
 
 class Event(Base):
@@ -82,15 +82,15 @@ class Event(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False)
-    date = Column(DateTime, nullable=False)
     description = Column(Text)
-    capacity = Column(Integer)
-    ticket_price = Column(Float)
-    status = Column(String(50), default="planned")
+    event_date = Column(DateTime, nullable=False)
+    venue_capacity = Column(Integer, default=0)
+    ticket_price = Column(Float, default=0.0)
     created_by = Column(Integer, ForeignKey("users.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    created_by_user = relationship("User", back_populates="events")
+    # Relationships
+    created_by_user = relationship("User", back_populates="events", foreign_keys=[created_by])
     costs = relationship("Cost", back_populates="event", cascade="all, delete-orphan")
     revenues = relationship("Revenue", back_populates="event", cascade="all, delete-orphan")
 
@@ -99,85 +99,67 @@ class Cost(Base):
     __tablename__ = "costs"
     
     id = Column(Integer, primary_key=True, index=True)
-    event_id = Column(Integer, ForeignKey("events.id"), nullable=True)  # Nullable for general costs
+    event_id = Column(Integer, ForeignKey("events.id"), nullable=False)
     category = Column(String(50), nullable=False)
     amount = Column(Float, nullable=False)
     description = Column(Text)
-    vendor = Column(String(255))  # Supplier/vendor name
-    invoice_number = Column(String(100))  # Invoice/receipt number
-    receipt_id = Column(Integer, ForeignKey("receipts.id"), nullable=True)  # Link to receipt
+    receipt_id = Column(Integer, ForeignKey("receipts.id"), nullable=True)
     created_by = Column(Integer, ForeignKey("users.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
-    cost_date = Column(DateTime, default=datetime.utcnow)  # Actual date of expense
     
+    # Relationships
     event = relationship("Event", back_populates="costs")
-    created_by_user = relationship("User", back_populates="costs")
+    created_by_user = relationship("User", back_populates="costs", foreign_keys=[created_by])
     receipt = relationship("Receipt", back_populates="costs")
-
-
-class Receipt(Base):
-    """Receipt/Invoice with image and OCR data"""
-    __tablename__ = "receipts"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    
-    # File info
-    filename = Column(String(255), nullable=False)
-    content_type = Column(String(100))  # image/jpeg, image/png, application/pdf
-    file_data = Column(LargeBinary)  # Store image in DB for simplicity
-    file_size = Column(Integer)
-    
-    # Receipt metadata
-    store_name = Column(String(255))  # Detected or manual store name
-    receipt_date = Column(DateTime)   # Date on receipt
-    receipt_number = Column(String(100))
-    total_amount = Column(Float)      # Total from receipt
-    currency = Column(String(10), default="PLN")
-    
-    # OCR data
-    status = Column(String(50), default=ReceiptStatus.pending.value)
-    ocr_raw_text = Column(Text)       # Raw OCR output
-    ocr_items = Column(Text)          # JSON array of detected items
-    ocr_confidence = Column(Float)    # OCR confidence score 0-100
-    
-    # Tracking
-    uploaded_by = Column(Integer, ForeignKey("users.id"))
-    uploaded_at = Column(DateTime, default=datetime.utcnow)
-    processed_at = Column(DateTime)
-    verified_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    verified_at = Column(DateTime)
-    notes = Column(Text)
-    
-    uploaded_by_user = relationship("User", back_populates="receipts", foreign_keys=[uploaded_by])
-    costs = relationship("Cost", back_populates="receipt")
 
 
 class Revenue(Base):
     __tablename__ = "revenues"
     
     id = Column(Integer, primary_key=True, index=True)
-    event_id = Column(Integer, ForeignKey("events.id"), nullable=True)
+    event_id = Column(Integer, ForeignKey("events.id"), nullable=False)
     source = Column(String(50), nullable=False)
     amount = Column(Float, nullable=False)
     description = Column(Text)
     recorded_by = Column(Integer, ForeignKey("users.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
-    revenue_date = Column(DateTime, default=datetime.utcnow)
     
+    # Relationships
     event = relationship("Event", back_populates="revenues")
-    recorded_by_user = relationship("User", back_populates="revenues")
+    recorded_by_user = relationship("User", back_populates="revenues", foreign_keys=[recorded_by])
 
 
-class FinancialReport(Base):
-    __tablename__ = "financial_reports"
+class Receipt(Base):
+    __tablename__ = "receipts"
     
     id = Column(Integer, primary_key=True, index=True)
-    event_id = Column(Integer, ForeignKey("events.id"), nullable=True)
-    report_type = Column(String(50))
-    period_from = Column(DateTime)
-    period_to = Column(DateTime)
-    total_costs = Column(Float)
-    total_revenue = Column(Float)
-    net_profit = Column(Float)
-    generated_at = Column(DateTime, default=datetime.utcnow)
-    generated_by = Column(Integer, ForeignKey("users.id"))
+    store_name = Column(String(255))
+    receipt_date = Column(DateTime)
+    total_amount = Column(Float)
+    ocr_text = Column(Text)  # Original OCR text
+    parsed_items = Column(Text)  # JSON of parsed items
+    status = Column(String(50), default=ReceiptStatus.PENDING.value)
+    uploaded_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    processed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    processed_at = Column(DateTime, nullable=True)
+    
+    # Relationships with explicit foreign_keys
+    uploader = relationship("User", back_populates="uploaded_receipts", foreign_keys=[uploaded_by])
+    processor = relationship("User", back_populates="processed_receipts", foreign_keys=[processed_by])
+    costs = relationship("Cost", back_populates="receipt")
+
+
+class ChatMessage(Base):
+    """Live chat messages between users"""
+    __tablename__ = "chat_messages"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    sender_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    content = Column(Text, nullable=False)
+    message_type = Column(String(20), default="text")  # text, system, announcement
+    is_read = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationship
+    sender = relationship("User", back_populates="sent_messages", foreign_keys=[sender_id])

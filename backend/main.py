@@ -1,49 +1,47 @@
 """
 Music Venue Management System - FastAPI Backend
-With Receipt OCR and Extended Cost Management
+With Receipt OCR and Live Chat Support
 """
 
-import os
-import json
-import base64
-import re
-from datetime import datetime, timedelta
-from typing import Optional, List
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import func, desc
-from pathlib import Path
+from sqlalchemy import func
+from datetime import datetime, timedelta
+from typing import List, Optional, Dict, Set
+import json
+import re
+import os
+import asyncio
 
 from database import engine, get_db, Base
-from models import User, Event, Cost, Revenue, Receipt, FinancialReport, UserRole, CostCategory, RevenueSource, ReceiptStatus
+from models import User, Event, Cost, Revenue, Receipt, ChatMessage
+from models import UserRole, CostCategory, RevenueSource, ReceiptStatus
 from schemas import (
-    UserCreate, UserResponse, UserLogin, Token, UserUpdate,
-    EventCreate, EventUpdate, EventResponse, EventListResponse,
+    UserLogin, UserRegister, UserResponse, UserUpdate, Token,
+    EventCreate, EventUpdate, EventResponse,
     CostCreate, CostUpdate, CostResponse,
     RevenueCreate, RevenueUpdate, RevenueResponse,
-    ReceiptUploadResponse, ReceiptResponse, ReceiptDetailResponse, ReceiptUpdate, ReceiptListResponse, ReceiptOCRResult, OCRItem,
-    ReportResponse, PeriodReportResponse, DetailedReportResponse, CategoryBreakdown,
-    CategoriesResponse, MessageResponse
+    ReceiptUpload, ReceiptUploadResponse, ReceiptResponse, ReceiptOCRResult, OCRItem,
+    CreateCostsFromReceipt, CategoriesResponse,
+    ChatMessageCreate, ChatMessageResponse, ChatHistoryResponse, ChatUserStatus,
+    EventReport, PeriodReport, MessageResponse
 )
-from security import (
-    verify_password, get_password_hash, create_access_token,
-    verify_token, SECRET_KEY
-)
+from security import verify_password, get_password_hash, create_access_token, verify_token
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+
+# ==================== APP SETUP ====================
 
 app = FastAPI(
     title="Music Venue Management System",
-    description="API do zarządzania finansami klubu muzycznego z OCR paragonów",
+    description="API do zarządzania finansami klubu muzycznego z live chatem",
     version="2.0.0"
 )
 
-# CORS - Allow all for development
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -54,6 +52,86 @@ app.add_middleware(
 
 security = HTTPBearer(auto_error=False)
 
+
+# ==================== WEBSOCKET CONNECTION MANAGER ====================
+
+class ConnectionManager:
+    """Manages WebSocket connections for live chat"""
+    
+    def __init__(self):
+        self.active_connections: Dict[int, WebSocket] = {}
+        self.user_last_seen: Dict[int, datetime] = {}
+    
+    async def connect(self, websocket: WebSocket, user_id: int):
+        await websocket.accept()
+        self.active_connections[user_id] = websocket
+        self.user_last_seen[user_id] = datetime.utcnow()
+    
+    def disconnect(self, user_id: int):
+        if user_id in self.active_connections:
+            del self.active_connections[user_id]
+        self.user_last_seen[user_id] = datetime.utcnow()
+    
+    async def send_personal_message(self, message: dict, user_id: int):
+        if user_id in self.active_connections:
+            try:
+                await self.active_connections[user_id].send_json(message)
+            except:
+                self.disconnect(user_id)
+    
+    async def broadcast(self, message: dict):
+        disconnected = []
+        for user_id, connection in self.active_connections.items():
+            try:
+                await connection.send_json(message)
+            except:
+                disconnected.append(user_id)
+        for user_id in disconnected:
+            self.disconnect(user_id)
+    
+    def get_online_users(self) -> Set[int]:
+        return set(self.active_connections.keys())
+    
+    def is_online(self, user_id: int) -> bool:
+        return user_id in self.active_connections
+
+
+manager = ConnectionManager()
+
+
+# ==================== STARTUP ====================
+
+@app.on_event("startup")
+async def startup_event():
+    Base.metadata.create_all(bind=engine)
+    
+    db = next(get_db())
+    try:
+        default_users = [
+            {"email": "admin@venue.com", "password": "Admin123!", "full_name": "Administrator", "role": "owner"},
+            {"email": "manager@venue.com", "password": "Manager123!", "full_name": "Manager Klubu", "role": "manager"},
+            {"email": "worker@venue.com", "password": "Worker123!", "full_name": "Pracownik", "role": "worker"},
+        ]
+        
+        for user_data in default_users:
+            existing = db.query(User).filter(User.email == user_data["email"]).first()
+            if not existing:
+                user = User(
+                    email=user_data["email"],
+                    password_hash=get_password_hash(user_data["password"]),
+                    full_name=user_data["full_name"],
+                    role=user_data["role"]
+                )
+                db.add(user)
+        
+        db.commit()
+        print("✅ Default users created")
+    except Exception as e:
+        print(f"⚠️ Startup: {e}")
+    finally:
+        db.close()
+
+
 # ==================== AUTH HELPERS ====================
 
 def get_current_user(
@@ -61,7 +139,7 @@ def get_current_user(
     db: Session = Depends(get_db)
 ) -> User:
     if not credentials:
-        raise HTTPException(status_code=401, detail="Brak tokena autoryzacji")
+        raise HTTPException(status_code=401, detail="Wymagana autoryzacja")
     
     payload = verify_token(credentials.credentials)
     if not payload:
@@ -78,7 +156,7 @@ def get_current_user(
     return user
 
 
-def require_role(allowed_roles: list):
+def require_role(allowed_roles: List[str]):
     def role_checker(current_user: User = Depends(get_current_user)):
         if current_user.role not in allowed_roles:
             raise HTTPException(status_code=403, detail="Brak uprawnień")
@@ -86,61 +164,25 @@ def require_role(allowed_roles: list):
     return role_checker
 
 
-# ==================== STARTUP ====================
-
-@app.on_event("startup")
-async def startup_event():
-    db = next(get_db())
-    
-    # Create default users if not exist
-    default_users = [
-        {"email": "admin@venue.com", "password": "Admin123!", "full_name": "Administrator", "role": "owner"},
-        {"email": "manager@venue.com", "password": "Manager123!", "full_name": "Manager Klubu", "role": "manager"},
-        {"email": "worker@venue.com", "password": "Worker123!", "full_name": "Pracownik", "role": "worker"},
-    ]
-    
-    created = False
-    for user_data in default_users:
-        existing = db.query(User).filter(User.email == user_data["email"]).first()
-        if not existing:
-            user = User(
-                email=user_data["email"],
-                password_hash=get_password_hash(user_data["password"]),
-                full_name=user_data["full_name"],
-                role=user_data["role"]
-            )
-            db.add(user)
-            created = True
-    
-    if created:
-        db.commit()
-        print("✅ Default users created")
-
-
 # ==================== HEALTH CHECK ====================
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "version": "2.0.0"}
+    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
 
 @app.get("/")
 def root():
-    return {
-        "message": "Music Venue Management System API",
-        "version": "2.0.0",
-        "docs": "/docs",
-        "frontend": "/app"
-    }
+    return {"message": "Music Venue API v2.0", "docs": "/docs", "app": "/app"}
 
 
 # ==================== AUTH ENDPOINTS ====================
 
 @app.post("/api/auth/login", response_model=Token)
-def login(user_data: UserLogin, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == user_data.email).first()
+def login(data: UserLogin, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == data.email).first()
     
-    if not user or not verify_password(user_data.password, user.password_hash):
+    if not user or not verify_password(data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Nieprawidłowy email lub hasło")
     
     if not user.is_active:
@@ -148,34 +190,39 @@ def login(user_data: UserLogin, db: Session = Depends(get_db)):
     
     access_token = create_access_token(data={"sub": str(user.id), "role": user.role})
     
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "user": user
-    }
+    return Token(
+        access_token=access_token,
+        user=UserResponse.model_validate(user)
+    )
 
 
-@app.post("/api/auth/register", response_model=UserResponse)
-def register(user_data: UserCreate, db: Session = Depends(get_db)):
-    existing = db.query(User).filter(User.email == user_data.email).first()
+@app.post("/api/auth/register", response_model=Token)
+def register(data: UserRegister, db: Session = Depends(get_db)):
+    existing = db.query(User).filter(User.email == data.email).first()
     if existing:
         raise HTTPException(status_code=400, detail="Email już zarejestrowany")
     
     user = User(
-        email=user_data.email,
-        password_hash=get_password_hash(user_data.password),
-        full_name=user_data.full_name,
-        role="worker"  # Default role for self-registration
+        email=data.email,
+        password_hash=get_password_hash(data.password),
+        full_name=data.full_name,
+        role=data.role.value
     )
     db.add(user)
     db.commit()
     db.refresh(user)
-    return user
+    
+    access_token = create_access_token(data={"sub": str(user.id), "role": user.role})
+    
+    return Token(
+        access_token=access_token,
+        user=UserResponse.model_validate(user)
+    )
 
 
 @app.get("/api/auth/me", response_model=UserResponse)
 def get_me(current_user: User = Depends(get_current_user)):
-    return current_user
+    return UserResponse.model_validate(current_user)
 
 
 # ==================== USER MANAGEMENT ====================
@@ -185,13 +232,14 @@ def list_users(
     current_user: User = Depends(require_role(["owner", "manager"])),
     db: Session = Depends(get_db)
 ):
-    return db.query(User).all()
+    users = db.query(User).all()
+    return [UserResponse.model_validate(u) for u in users]
 
 
 @app.put("/api/users/{user_id}", response_model=UserResponse)
 def update_user(
     user_id: int,
-    user_data: UserUpdate,
+    data: UserUpdate,
     current_user: User = Depends(require_role(["owner"])),
     db: Session = Depends(get_db)
 ):
@@ -199,13 +247,16 @@ def update_user(
     if not user:
         raise HTTPException(status_code=404, detail="Użytkownik nie znaleziony")
     
-    update_data = user_data.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(user, field, value)
+    if data.full_name:
+        user.full_name = data.full_name
+    if data.role:
+        user.role = data.role.value
+    if data.is_active is not None:
+        user.is_active = data.is_active
     
     db.commit()
     db.refresh(user)
-    return user
+    return UserResponse.model_validate(user)
 
 
 @app.delete("/api/users/{user_id}")
@@ -215,7 +266,7 @@ def delete_user(
     db: Session = Depends(get_db)
 ):
     if user_id == current_user.id:
-        raise HTTPException(status_code=400, detail="Nie możesz usunąć siebie")
+        raise HTTPException(status_code=400, detail="Nie można usunąć własnego konta")
     
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -226,54 +277,46 @@ def delete_user(
     return {"message": "Użytkownik usunięty"}
 
 
-# ==================== EVENT ENDPOINTS ====================
+# ==================== EVENTS ====================
 
 @app.post("/api/events", response_model=EventResponse)
 def create_event(
-    event_data: EventCreate,
+    data: EventCreate,
     current_user: User = Depends(require_role(["owner", "manager"])),
     db: Session = Depends(get_db)
 ):
-    event = Event(**event_data.model_dump(), created_by=current_user.id)
+    event = Event(
+        name=data.name,
+        description=data.description,
+        event_date=data.event_date,
+        venue_capacity=data.venue_capacity,
+        ticket_price=data.ticket_price,
+        created_by=current_user.id
+    )
     db.add(event)
     db.commit()
     db.refresh(event)
-    return event
+    return EventResponse.model_validate(event)
 
 
-@app.get("/api/events", response_model=EventListResponse)
-def list_events(
-    skip: int = 0,
-    limit: int = 100,
-    status: Optional[str] = None,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    query = db.query(Event)
-    if status:
-        query = query.filter(Event.status == status)
-    
-    total = query.count()
-    events = query.order_by(desc(Event.date)).offset(skip).limit(limit).all()
-    return {"events": events, "total": total}
+@app.get("/api/events", response_model=List[EventResponse])
+def list_events(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    events = db.query(Event).order_by(Event.event_date.desc()).all()
+    return [EventResponse.model_validate(e) for e in events]
 
 
 @app.get("/api/events/{event_id}", response_model=EventResponse)
-def get_event(
-    event_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+def get_event(event_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
         raise HTTPException(status_code=404, detail="Wydarzenie nie znalezione")
-    return event
+    return EventResponse.model_validate(event)
 
 
 @app.put("/api/events/{event_id}", response_model=EventResponse)
 def update_event(
     event_id: int,
-    event_data: EventUpdate,
+    data: EventUpdate,
     current_user: User = Depends(require_role(["owner", "manager"])),
     db: Session = Depends(get_db)
 ):
@@ -281,19 +324,18 @@ def update_event(
     if not event:
         raise HTTPException(status_code=404, detail="Wydarzenie nie znalezione")
     
-    update_data = event_data.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
+    for field, value in data.model_dump(exclude_unset=True).items():
         setattr(event, field, value)
     
     db.commit()
     db.refresh(event)
-    return event
+    return EventResponse.model_validate(event)
 
 
 @app.delete("/api/events/{event_id}")
 def delete_event(
     event_id: int,
-    current_user: User = Depends(require_role(["owner"])),
+    current_user: User = Depends(require_role(["owner", "manager"])),
     db: Session = Depends(get_db)
 ):
     event = db.query(Event).filter(Event.id == event_id).first()
@@ -305,438 +347,52 @@ def delete_event(
     return {"message": "Wydarzenie usunięte"}
 
 
-# ==================== RECEIPT / OCR ENDPOINTS ====================
-
-def simple_ocr_parse(text: str) -> ReceiptOCRResult:
-    """
-    Simple receipt parser - extracts basic info from OCR text.
-    In production, use dedicated OCR API (Google Vision, AWS Textract, etc.)
-    """
-    result = ReceiptOCRResult()
-    lines = text.strip().split('\n')
-    
-    # Common Polish store patterns
-    store_patterns = {
-        'biedronka': 'Biedronka',
-        'lidl': 'Lidl',
-        'żabka': 'Żabka',
-        'zabka': 'Żabka',
-        'carrefour': 'Carrefour',
-        'auchan': 'Auchan',
-        'kaufland': 'Kaufland',
-        'tesco': 'Tesco',
-        'makro': 'Makro',
-        'selgros': 'Selgros',
-        'hurtownia': 'Hurtownia',
-        'lewiatan': 'Lewiatan',
-        'dino': 'Dino',
-        'netto': 'Netto',
-        'stokrotka': 'Stokrotka',
-        'polo market': 'Polo Market',
-    }
-    
-    # Try to find store name
-    text_lower = text.lower()
-    for pattern, name in store_patterns.items():
-        if pattern in text_lower:
-            result.store_name = name
-            break
-    
-    # Try to find date (formats: DD.MM.YYYY, DD-MM-YYYY, DD/MM/YYYY)
-    date_patterns = [
-        r'(\d{2})[.\-/](\d{2})[.\-/](\d{4})',
-        r'(\d{4})[.\-/](\d{2})[.\-/](\d{2})',
-    ]
-    for pattern in date_patterns:
-        match = re.search(pattern, text)
-        if match:
-            try:
-                groups = match.groups()
-                if len(groups[0]) == 4:  # YYYY-MM-DD format
-                    result.receipt_date = datetime(int(groups[0]), int(groups[1]), int(groups[2]))
-                else:  # DD-MM-YYYY format
-                    result.receipt_date = datetime(int(groups[2]), int(groups[1]), int(groups[0]))
-                break
-            except:
-                pass
-    
-    # Try to find total (SUMA, RAZEM, TOTAL, DO ZAPŁATY)
-    total_patterns = [
-        r'(?:suma|razem|total|do zap[łl]aty|zap[łl]acono)[:\s]*(\d+[,\.]\d{2})',
-        r'(\d+[,\.]\d{2})\s*(?:pln|zł|zl)',
-    ]
-    for pattern in total_patterns:
-        match = re.search(pattern, text_lower)
-        if match:
-            try:
-                total_str = match.group(1).replace(',', '.')
-                result.total = float(total_str)
-                break
-            except:
-                pass
-    
-    # Try to find receipt number (NR, PARAGON, FAKTURA)
-    receipt_patterns = [
-        r'(?:nr|paragon|faktura|dok)[:\s#]*([A-Z0-9\-/]+)',
-    ]
-    for pattern in receipt_patterns:
-        match = re.search(pattern, text_lower)
-        if match:
-            result.receipt_number = match.group(1).upper()
-            break
-    
-    # Parse items (basic pattern: name followed by price)
-    items = []
-    item_pattern = r'^(.+?)\s+(\d+[,\.]\d{2})\s*[A-Z]?$'
-    for line in lines:
-        match = re.match(item_pattern, line.strip())
-        if match:
-            name = match.group(1).strip()
-            price_str = match.group(2).replace(',', '.')
-            if len(name) > 2 and len(name) < 50:
-                items.append(OCRItem(
-                    name=name,
-                    total_price=float(price_str),
-                    category_suggestion=categorize_item(name)
-                ))
-    
-    result.items = items
-    result.raw_text = text
-    result.confidence = 60.0 if result.store_name or result.total else 30.0
-    
-    return result
-
-
-def categorize_item(name: str) -> str:
-    """Suggest cost category based on item name"""
-    name_lower = name.lower()
-    
-    alcohol_keywords = ['wódka', 'vodka', 'piwo', 'beer', 'wino', 'wine', 'rum', 'whisky', 'gin', 'likier', 'alkohol']
-    beverage_keywords = ['cola', 'fanta', 'sprite', 'sok', 'juice', 'woda', 'water', 'napój', 'red bull', 'monster']
-    food_keywords = ['chips', 'orzeszki', 'paluszki', 'snack', 'przekąsk', 'kanapk', 'sandwich']
-    supplies_keywords = ['kubek', 'słomk', 'serwetk', 'talerz', 'sztućc', 'reklamówk', 'torb']
-    cleaning_keywords = ['środek', 'czyszcz', 'mydło', 'papier toalet', 'ręcznik']
-    
-    for kw in alcohol_keywords:
-        if kw in name_lower:
-            return 'bar_alcohol'
-    for kw in beverage_keywords:
-        if kw in name_lower:
-            return 'bar_beverages'
-    for kw in food_keywords:
-        if kw in name_lower:
-            return 'bar_food'
-    for kw in supplies_keywords:
-        if kw in name_lower:
-            return 'bar_supplies'
-    for kw in cleaning_keywords:
-        if kw in name_lower:
-            return 'cleaning'
-    
-    return 'other'
-
-
-@app.post("/api/receipts/upload", response_model=ReceiptUploadResponse)
-async def upload_receipt(
-    file: UploadFile = File(...),
-    event_id: Optional[int] = Form(None),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Upload a receipt image for processing"""
-    
-    # Validate file type
-    allowed_types = ['image/jpeg', 'image/png', 'image/jpg', 'image/webp', 'application/pdf']
-    if file.content_type not in allowed_types:
-        raise HTTPException(status_code=400, detail=f"Nieobsługiwany format pliku. Dozwolone: {', '.join(allowed_types)}")
-    
-    # Read file
-    file_data = await file.read()
-    file_size = len(file_data)
-    
-    # Max 10MB
-    if file_size > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Plik zbyt duży. Maksymalnie 10MB.")
-    
-    # Create receipt record
-    receipt = Receipt(
-        filename=file.filename,
-        content_type=file.content_type,
-        file_data=file_data,
-        file_size=file_size,
-        status=ReceiptStatus.pending.value,
-        uploaded_by=current_user.id
-    )
-    db.add(receipt)
-    db.commit()
-    db.refresh(receipt)
-    
-    return ReceiptUploadResponse(
-        id=receipt.id,
-        filename=receipt.filename,
-        status=receipt.status,
-        message="Paragon przesłany. Użyj /api/receipts/{id}/process aby przetworzyć OCR."
-    )
-
-
-@app.post("/api/receipts/{receipt_id}/process", response_model=ReceiptOCRResult)
-async def process_receipt_ocr(
-    receipt_id: int,
-    ocr_text: Optional[str] = Form(None),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    Process receipt with OCR.
-    If ocr_text is provided, use it directly (for client-side OCR).
-    Otherwise, returns instructions for manual entry or external OCR.
-    """
-    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
-    if not receipt:
-        raise HTTPException(status_code=404, detail="Paragon nie znaleziony")
-    
-    receipt.status = ReceiptStatus.processing.value
-    db.commit()
-    
-    if ocr_text:
-        # Process provided OCR text
-        result = simple_ocr_parse(ocr_text)
-        
-        # Update receipt with OCR results
-        receipt.store_name = result.store_name
-        receipt.receipt_date = result.receipt_date
-        receipt.receipt_number = result.receipt_number
-        receipt.total_amount = result.total
-        receipt.ocr_raw_text = result.raw_text
-        receipt.ocr_items = json.dumps([item.model_dump() for item in result.items])
-        receipt.ocr_confidence = result.confidence
-        receipt.status = ReceiptStatus.processed.value
-        receipt.processed_at = datetime.utcnow()
-        
-        db.commit()
-        return result
-    else:
-        # Return instruction for manual/external OCR
-        receipt.status = ReceiptStatus.pending.value
-        db.commit()
-        
-        return ReceiptOCRResult(
-            raw_text="Proszę przesłać tekst OCR lub użyć zewnętrznego serwisu OCR (Google Vision, Tesseract) i przesłać wynik.",
-            confidence=0.0
-        )
-
-
-@app.get("/api/receipts", response_model=ReceiptListResponse)
-def list_receipts(
-    skip: int = 0,
-    limit: int = 50,
-    status: Optional[str] = None,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    query = db.query(Receipt)
-    if status:
-        query = query.filter(Receipt.status == status)
-    
-    total = query.count()
-    receipts = query.order_by(desc(Receipt.uploaded_at)).offset(skip).limit(limit).all()
-    return {"receipts": receipts, "total": total}
-
-
-@app.get("/api/receipts/{receipt_id}", response_model=ReceiptDetailResponse)
-def get_receipt(
-    receipt_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
-    if not receipt:
-        raise HTTPException(status_code=404, detail="Paragon nie znaleziony")
-    return receipt
-
-
-@app.get("/api/receipts/{receipt_id}/image")
-def get_receipt_image(
-    receipt_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get receipt image data"""
-    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
-    if not receipt:
-        raise HTTPException(status_code=404, detail="Paragon nie znaleziony")
-    
-    if not receipt.file_data:
-        raise HTTPException(status_code=404, detail="Brak obrazu paragonu")
-    
-    return Response(content=receipt.file_data, media_type=receipt.content_type)
-
-
-@app.put("/api/receipts/{receipt_id}", response_model=ReceiptResponse)
-def update_receipt(
-    receipt_id: int,
-    receipt_data: ReceiptUpdate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
-    if not receipt:
-        raise HTTPException(status_code=404, detail="Paragon nie znaleziony")
-    
-    update_data = receipt_data.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(receipt, field, value.value if hasattr(value, 'value') else value)
-    
-    db.commit()
-    db.refresh(receipt)
-    return receipt
-
-
-@app.post("/api/receipts/{receipt_id}/verify")
-def verify_receipt(
-    receipt_id: int,
-    current_user: User = Depends(require_role(["owner", "manager"])),
-    db: Session = Depends(get_db)
-):
-    """Mark receipt as manually verified"""
-    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
-    if not receipt:
-        raise HTTPException(status_code=404, detail="Paragon nie znaleziony")
-    
-    receipt.status = ReceiptStatus.verified.value
-    receipt.verified_by = current_user.id
-    receipt.verified_at = datetime.utcnow()
-    db.commit()
-    
-    return {"message": "Paragon zweryfikowany", "status": receipt.status}
-
-
-@app.delete("/api/receipts/{receipt_id}")
-def delete_receipt(
-    receipt_id: int,
-    current_user: User = Depends(require_role(["owner", "manager"])),
-    db: Session = Depends(get_db)
-):
-    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
-    if not receipt:
-        raise HTTPException(status_code=404, detail="Paragon nie znaleziony")
-    
-    db.delete(receipt)
-    db.commit()
-    return {"message": "Paragon usunięty"}
-
-
-@app.post("/api/receipts/{receipt_id}/create-costs")
-def create_costs_from_receipt(
-    receipt_id: int,
-    event_id: Optional[int] = None,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Create cost entries from receipt items"""
-    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
-    if not receipt:
-        raise HTTPException(status_code=404, detail="Paragon nie znaleziony")
-    
-    if not receipt.ocr_items:
-        raise HTTPException(status_code=400, detail="Paragon nie ma rozpoznanych pozycji")
-    
-    try:
-        items = json.loads(receipt.ocr_items)
-    except:
-        raise HTTPException(status_code=400, detail="Błąd parsowania pozycji paragonu")
-    
-    created_costs = []
-    for item in items:
-        cost = Cost(
-            event_id=event_id,
-            category=item.get('category_suggestion', 'other'),
-            amount=item.get('total_price', 0),
-            description=item.get('name', 'Pozycja z paragonu'),
-            vendor=receipt.store_name,
-            receipt_id=receipt.id,
-            created_by=current_user.id,
-            cost_date=receipt.receipt_date or datetime.utcnow()
-        )
-        db.add(cost)
-        created_costs.append(cost)
-    
-    db.commit()
-    
-    return {
-        "message": f"Utworzono {len(created_costs)} kosztów z paragonu",
-        "costs_count": len(created_costs)
-    }
-
-
-# ==================== COST ENDPOINTS ====================
+# ==================== COSTS ====================
 
 @app.post("/api/costs", response_model=CostResponse)
-def create_cost(
-    cost_data: CostCreate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    cost = Cost(**cost_data.model_dump(), created_by=current_user.id)
+def create_cost(data: CostCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    event = db.query(Event).filter(Event.id == data.event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Wydarzenie nie znalezione")
+    
+    cost = Cost(
+        event_id=data.event_id,
+        category=data.category.value,
+        amount=data.amount,
+        description=data.description,
+        receipt_id=data.receipt_id,
+        created_by=current_user.id
+    )
     db.add(cost)
     db.commit()
     db.refresh(cost)
-    return cost
-
-
-@app.get("/api/costs", response_model=List[CostResponse])
-def list_costs(
-    skip: int = 0,
-    limit: int = 100,
-    event_id: Optional[int] = None,
-    category: Optional[str] = None,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    query = db.query(Cost)
-    if event_id is not None:
-        query = query.filter(Cost.event_id == event_id)
-    if category:
-        query = query.filter(Cost.category == category)
-    
-    return query.order_by(desc(Cost.created_at)).offset(skip).limit(limit).all()
+    return CostResponse.model_validate(cost)
 
 
 @app.get("/api/costs/event/{event_id}", response_model=List[CostResponse])
-def get_event_costs(
-    event_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    return db.query(Cost).filter(Cost.event_id == event_id).all()
+def get_event_costs(event_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    costs = db.query(Cost).filter(Cost.event_id == event_id).all()
+    return [CostResponse.model_validate(c) for c in costs]
 
 
 @app.put("/api/costs/{cost_id}", response_model=CostResponse)
-def update_cost(
-    cost_id: int,
-    cost_data: CostUpdate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+def update_cost(cost_id: int, data: CostUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     cost = db.query(Cost).filter(Cost.id == cost_id).first()
     if not cost:
         raise HTTPException(status_code=404, detail="Koszt nie znaleziony")
     
-    update_data = cost_data.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(cost, field, value.value if hasattr(value, 'value') else value)
+    for field, value in data.model_dump(exclude_unset=True).items():
+        if field == "category" and value:
+            value = value.value
+        setattr(cost, field, value)
     
     db.commit()
     db.refresh(cost)
-    return cost
+    return CostResponse.model_validate(cost)
 
 
 @app.delete("/api/costs/{cost_id}")
-def delete_cost(
-    cost_id: int,
-    current_user: User = Depends(require_role(["owner", "manager"])),
-    db: Session = Depends(get_db)
-):
+def delete_cost(cost_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     cost = db.query(Cost).filter(Cost.id == cost_id).first()
     if not cost:
         raise HTTPException(status_code=404, detail="Koszt nie znaleziony")
@@ -746,56 +402,51 @@ def delete_cost(
     return {"message": "Koszt usunięty"}
 
 
-# ==================== REVENUE ENDPOINTS ====================
+# ==================== REVENUE ====================
 
 @app.post("/api/revenue", response_model=RevenueResponse)
-def create_revenue(
-    revenue_data: RevenueCreate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    revenue = Revenue(**revenue_data.model_dump(), recorded_by=current_user.id)
+def create_revenue(data: RevenueCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    event = db.query(Event).filter(Event.id == data.event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Wydarzenie nie znalezione")
+    
+    revenue = Revenue(
+        event_id=data.event_id,
+        source=data.source.value,
+        amount=data.amount,
+        description=data.description,
+        recorded_by=current_user.id
+    )
     db.add(revenue)
     db.commit()
     db.refresh(revenue)
-    return revenue
+    return RevenueResponse.model_validate(revenue)
 
 
 @app.get("/api/revenue/event/{event_id}", response_model=List[RevenueResponse])
-def get_event_revenue(
-    event_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    return db.query(Revenue).filter(Revenue.event_id == event_id).all()
+def get_event_revenue(event_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    revenues = db.query(Revenue).filter(Revenue.event_id == event_id).all()
+    return [RevenueResponse.model_validate(r) for r in revenues]
 
 
 @app.put("/api/revenue/{revenue_id}", response_model=RevenueResponse)
-def update_revenue(
-    revenue_id: int,
-    revenue_data: RevenueUpdate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+def update_revenue(revenue_id: int, data: RevenueUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     revenue = db.query(Revenue).filter(Revenue.id == revenue_id).first()
     if not revenue:
         raise HTTPException(status_code=404, detail="Przychód nie znaleziony")
     
-    update_data = revenue_data.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(revenue, field, value.value if hasattr(value, 'value') else value)
+    for field, value in data.model_dump(exclude_unset=True).items():
+        if field == "source" and value:
+            value = value.value
+        setattr(revenue, field, value)
     
     db.commit()
     db.refresh(revenue)
-    return revenue
+    return RevenueResponse.model_validate(revenue)
 
 
 @app.delete("/api/revenue/{revenue_id}")
-def delete_revenue(
-    revenue_id: int,
-    current_user: User = Depends(require_role(["owner", "manager"])),
-    db: Session = Depends(get_db)
-):
+def delete_revenue(revenue_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     revenue = db.query(Revenue).filter(Revenue.id == revenue_id).first()
     if not revenue:
         raise HTTPException(status_code=404, detail="Przychód nie znaleziony")
@@ -805,14 +456,375 @@ def delete_revenue(
     return {"message": "Przychód usunięty"}
 
 
-# ==================== REPORT ENDPOINTS ====================
+# ==================== RECEIPT OCR ====================
 
-@app.get("/api/reports/event/{event_id}", response_model=ReportResponse)
-def get_event_report(
-    event_id: int,
-    current_user: User = Depends(require_role(["owner", "manager"])),
+def simple_ocr_parse(text: str) -> ReceiptOCRResult:
+    """Parse receipt text with Polish store recognition"""
+    lines = text.strip().split('\n')
+    
+    # Store patterns
+    store_patterns = {
+        'biedronka': r'biedronka|jeronimo\s*martins',
+        'lidl': r'lidl',
+        'zabka': r'[żz]abka|żabka',
+        'carrefour': r'carrefour',
+        'auchan': r'auchan',
+        'kaufland': r'kaufland',
+        'makro': r'makro',
+        'selgros': r'selgros',
+        'lewiatan': r'lewiatan',
+        'dino': r'dino\s*(polska)?',
+        'netto': r'netto',
+        'stokrotka': r'stokrotka',
+        'intermarche': r'intermarch[eé]',
+        'polo market': r'polo\s*market',
+        'mila': r'mila',
+        'spolem': r'spo[lł]em',
+        'eurocash': r'eurocash',
+        'hurtownia': r'hurtownia',
+    }
+    
+    store_name = None
+    for name, pattern in store_patterns.items():
+        if re.search(pattern, text.lower()):
+            store_name = name.title()
+            break
+    
+    # Date pattern
+    receipt_date = None
+    date_patterns = [
+        r'(\d{4}[-./]\d{2}[-./]\d{2})',
+        r'(\d{2}[-./]\d{2}[-./]\d{4})',
+        r'(\d{2}[-./]\d{2}[-./]\d{2})',
+    ]
+    for pattern in date_patterns:
+        match = re.search(pattern, text)
+        if match:
+            receipt_date = match.group(1)
+            break
+    
+    # Total amount
+    total = None
+    total_patterns = [
+        r'suma[:\s]*(\d+[.,]\d{2})',
+        r'razem[:\s]*(\d+[.,]\d{2})',
+        r'do\s*zap[łl]aty[:\s]*(\d+[.,]\d{2})',
+        r'total[:\s]*(\d+[.,]\d{2})',
+        r'kwota[:\s]*(\d+[.,]\d{2})',
+    ]
+    for pattern in total_patterns:
+        match = re.search(pattern, text.lower())
+        if match:
+            total = float(match.group(1).replace(',', '.'))
+            break
+    
+    # Parse items
+    items = []
+    item_pattern = r'([A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż0-9\s\-\.]+?)\s+(\d+[.,]\d{2})\s*([A-Z])?'
+    
+    for line in lines:
+        match = re.search(item_pattern, line)
+        if match:
+            name = match.group(1).strip()
+            price = float(match.group(2).replace(',', '.'))
+            
+            if len(name) > 3 and price > 0 and price < 10000:
+                # Auto-categorize
+                category = categorize_item(name)
+                items.append(OCRItem(name=name, price=price, category=category))
+    
+    return ReceiptOCRResult(
+        store_name=store_name,
+        receipt_date=receipt_date,
+        items=items,
+        total=total
+    )
+
+
+def categorize_item(name: str) -> str:
+    """Auto-categorize item based on name"""
+    name_lower = name.lower()
+    
+    alcohol_keywords = ['piwo', 'wino', 'wódka', 'whisky', 'rum', 'gin', 'likier', 'beer', 'vodka', 'alkohol']
+    beverage_keywords = ['cola', 'fanta', 'sprite', 'pepsi', 'sok', 'woda', 'napój', 'redbull', 'monster', 'juice']
+    food_keywords = ['chipsy', 'orzeszki', 'paluszki', 'ciastka', 'słodycze', 'przekąski', 'kanapk']
+    
+    for kw in alcohol_keywords:
+        if kw in name_lower:
+            return 'bar_alcohol'
+    
+    for kw in beverage_keywords:
+        if kw in name_lower:
+            return 'bar_beverages'
+    
+    for kw in food_keywords:
+        if kw in name_lower:
+            return 'bar_food'
+    
+    return 'bar_supplies'
+
+
+@app.post("/api/receipts/upload", response_model=ReceiptUploadResponse)
+def upload_receipt(data: ReceiptUpload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Upload and parse receipt OCR text"""
+    ocr_result = simple_ocr_parse(data.ocr_text)
+    
+    receipt_date = None
+    if ocr_result.receipt_date:
+        try:
+            for fmt in ['%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%Y/%m/%d', '%d.%m.%Y']:
+                try:
+                    receipt_date = datetime.strptime(ocr_result.receipt_date, fmt)
+                    break
+                except:
+                    continue
+        except:
+            pass
+    
+    receipt = Receipt(
+        store_name=ocr_result.store_name,
+        receipt_date=receipt_date,
+        total_amount=ocr_result.total,
+        ocr_text=data.ocr_text,
+        parsed_items=json.dumps([item.model_dump() for item in ocr_result.items]),
+        status=ReceiptStatus.PENDING.value,
+        uploaded_by=current_user.id
+    )
+    db.add(receipt)
+    db.commit()
+    db.refresh(receipt)
+    
+    return ReceiptUploadResponse(
+        id=receipt.id,
+        store_name=receipt.store_name,
+        receipt_date=receipt.receipt_date,
+        total_amount=receipt.total_amount,
+        ocr_result=ocr_result,
+        status=receipt.status,
+        created_at=receipt.created_at
+    )
+
+
+@app.get("/api/receipts", response_model=List[ReceiptResponse])
+def list_receipts(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    receipts = db.query(Receipt).order_by(Receipt.created_at.desc()).all()
+    return [ReceiptResponse.model_validate(r) for r in receipts]
+
+
+@app.post("/api/receipts/{receipt_id}/create-costs")
+def create_costs_from_receipt(
+    receipt_id: int,
+    data: CreateCostsFromReceipt,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    """Create costs from a receipt"""
+    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
+    if not receipt:
+        raise HTTPException(status_code=404, detail="Paragon nie znaleziony")
+    
+    event = db.query(Event).filter(Event.id == data.event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Wydarzenie nie znalezione")
+    
+    cost = Cost(
+        event_id=data.event_id,
+        category=data.category.value,
+        amount=receipt.total_amount or 0,
+        description=f"Paragon: {receipt.store_name or 'Nieznany sklep'} - {receipt.receipt_date or receipt.created_at}",
+        receipt_id=receipt.id,
+        created_by=current_user.id
+    )
+    db.add(cost)
+    
+    receipt.status = ReceiptStatus.PROCESSED.value
+    receipt.processed_by = current_user.id
+    receipt.processed_at = datetime.utcnow()
+    
+    db.commit()
+    
+    return {"message": "Koszt utworzony z paragonu", "cost_id": cost.id}
+
+
+# ==================== LIVE CHAT ====================
+
+@app.get("/api/chat/history", response_model=ChatHistoryResponse)
+def get_chat_history(
+    limit: int = 100,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get chat history and online users"""
+    messages = db.query(ChatMessage).order_by(ChatMessage.created_at.desc()).limit(limit).all()
+    messages = list(reversed(messages))
+    
+    # Build response with sender info
+    message_responses = []
+    for msg in messages:
+        sender = db.query(User).filter(User.id == msg.sender_id).first()
+        message_responses.append(ChatMessageResponse(
+            id=msg.id,
+            sender_id=msg.sender_id,
+            sender_name=sender.full_name if sender else "Nieznany",
+            sender_role=sender.role if sender else "worker",
+            content=msg.content,
+            message_type=msg.message_type,
+            is_read=msg.is_read,
+            created_at=msg.created_at
+        ))
+    
+    # Online users
+    users = db.query(User).filter(User.is_active == True).all()
+    online_users = []
+    for user in users:
+        online_users.append(ChatUserStatus(
+            user_id=user.id,
+            full_name=user.full_name,
+            role=user.role,
+            is_online=manager.is_online(user.id),
+            last_seen=manager.user_last_seen.get(user.id)
+        ))
+    
+    # Unread count
+    unread = db.query(ChatMessage).filter(
+        ChatMessage.is_read == False,
+        ChatMessage.sender_id != current_user.id
+    ).count()
+    
+    return ChatHistoryResponse(
+        messages=message_responses,
+        users_online=online_users,
+        total_unread=unread
+    )
+
+
+@app.post("/api/chat/messages", response_model=ChatMessageResponse)
+async def send_chat_message(
+    data: ChatMessageCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Send a chat message (REST fallback)"""
+    message = ChatMessage(
+        sender_id=current_user.id,
+        content=data.content,
+        message_type=data.message_type.value
+    )
+    db.add(message)
+    db.commit()
+    db.refresh(message)
+    
+    response = ChatMessageResponse(
+        id=message.id,
+        sender_id=message.sender_id,
+        sender_name=current_user.full_name,
+        sender_role=current_user.role,
+        content=message.content,
+        message_type=message.message_type,
+        is_read=message.is_read,
+        created_at=message.created_at
+    )
+    
+    # Broadcast via WebSocket
+    await manager.broadcast({
+        "type": "new_message",
+        "data": response.model_dump(mode='json')
+    })
+    
+    return response
+
+
+@app.post("/api/chat/mark-read")
+def mark_messages_read(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Mark all messages as read"""
+    db.query(ChatMessage).filter(
+        ChatMessage.sender_id != current_user.id,
+        ChatMessage.is_read == False
+    ).update({"is_read": True})
+    db.commit()
+    return {"message": "Wiadomości oznaczone jako przeczytane"}
+
+
+@app.websocket("/ws/chat/{token}")
+async def websocket_chat(websocket: WebSocket, token: str):
+    """WebSocket endpoint for real-time chat"""
+    # Verify token
+    payload = verify_token(token)
+    if not payload:
+        await websocket.close(code=4001)
+        return
+    
+    user_id = int(payload.get("sub"))
+    
+    db = next(get_db())
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        await websocket.close(code=4002)
+        return
+    
+    await manager.connect(websocket, user_id)
+    
+    # Notify others about user online
+    await manager.broadcast({
+        "type": "user_online",
+        "data": {"user_id": user_id, "full_name": user.full_name}
+    })
+    
+    try:
+        while True:
+            data = await websocket.receive_json()
+            
+            if data.get("type") == "message":
+                content = data.get("content", "").strip()
+                if content and len(content) <= 2000:
+                    message = ChatMessage(
+                        sender_id=user_id,
+                        content=content,
+                        message_type="text"
+                    )
+                    db.add(message)
+                    db.commit()
+                    db.refresh(message)
+                    
+                    await manager.broadcast({
+                        "type": "new_message",
+                        "data": {
+                            "id": message.id,
+                            "sender_id": user_id,
+                            "sender_name": user.full_name,
+                            "sender_role": user.role,
+                            "content": message.content,
+                            "message_type": message.message_type,
+                            "is_read": False,
+                            "created_at": message.created_at.isoformat()
+                        }
+                    })
+            
+            elif data.get("type") == "typing":
+                await manager.broadcast({
+                    "type": "user_typing",
+                    "data": {"user_id": user_id, "full_name": user.full_name}
+                })
+            
+            elif data.get("type") == "ping":
+                await websocket.send_json({"type": "pong"})
+    
+    except WebSocketDisconnect:
+        manager.disconnect(user_id)
+        await manager.broadcast({
+            "type": "user_offline",
+            "data": {"user_id": user_id, "full_name": user.full_name}
+        })
+    except Exception as e:
+        manager.disconnect(user_id)
+    finally:
+        db.close()
+
+
+# ==================== REPORTS ====================
+
+@app.get("/api/reports/event/{event_id}", response_model=EventReport)
+def get_event_report(event_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
         raise HTTPException(status_code=404, detail="Wydarzenie nie znalezione")
@@ -825,38 +837,41 @@ def get_event_report(
     net_profit = total_revenue - total_costs
     profit_margin = (net_profit / total_revenue * 100) if total_revenue > 0 else 0
     
-    costs_by_cat = db.query(Cost.category, func.sum(Cost.amount)).filter(
-        Cost.event_id == event_id
-    ).group_by(Cost.category).all()
+    costs_breakdown = {}
+    for cost in costs:
+        costs_breakdown[cost.category] = costs_breakdown.get(cost.category, 0) + cost.amount
     
-    revenue_by_src = db.query(Revenue.source, func.sum(Revenue.amount)).filter(
-        Revenue.event_id == event_id
-    ).group_by(Revenue.source).all()
+    revenue_breakdown = {}
+    for rev in revenues:
+        revenue_breakdown[rev.source] = revenue_breakdown.get(rev.source, 0) + rev.amount
     
-    return {
-        "event_id": event.id,
-        "event_name": event.name,
-        "event_date": event.date,
-        "total_costs": round(total_costs, 2),
-        "total_revenue": round(total_revenue, 2),
-        "net_profit": round(net_profit, 2),
-        "profit_margin": round(profit_margin, 2),
-        "costs_breakdown": {cat: round(amt, 2) for cat, amt in costs_by_cat},
-        "revenue_breakdown": {src: round(amt, 2) for src, amt in revenue_by_src}
-    }
+    return EventReport(
+        event_id=event.id,
+        event_name=event.name,
+        event_date=event.event_date,
+        total_costs=total_costs,
+        total_revenue=total_revenue,
+        net_profit=net_profit,
+        profit_margin=round(profit_margin, 2),
+        costs_breakdown=costs_breakdown,
+        revenue_breakdown=revenue_breakdown
+    )
 
 
-@app.get("/api/reports/period", response_model=PeriodReportResponse)
+@app.get("/api/reports/period", response_model=PeriodReport)
 def get_period_report(
     start_date: str,
     end_date: str,
-    current_user: User = Depends(require_role(["owner", "manager"])),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    start = datetime.fromisoformat(start_date)
-    end = datetime.fromisoformat(end_date)
+    try:
+        start = datetime.fromisoformat(start_date)
+        end = datetime.fromisoformat(end_date)
+    except:
+        raise HTTPException(status_code=400, detail="Nieprawidłowy format daty")
     
-    events = db.query(Event).filter(Event.date >= start, Event.date <= end).all()
+    events = db.query(Event).filter(Event.event_date.between(start, end)).all()
     event_ids = [e.id for e in events]
     
     total_costs = db.query(func.sum(Cost.amount)).filter(Cost.event_id.in_(event_ids)).scalar() or 0
@@ -864,75 +879,83 @@ def get_period_report(
     net_profit = total_revenue - total_costs
     profit_margin = (net_profit / total_revenue * 100) if total_revenue > 0 else 0
     
-    return {
-        "period_from": start,
-        "period_to": end,
-        "events_count": len(events),
-        "total_costs": round(total_costs, 2),
-        "total_revenue": round(total_revenue, 2),
-        "net_profit": round(net_profit, 2),
-        "profit_margin": round(profit_margin, 2)
-    }
+    return PeriodReport(
+        period_from=start,
+        period_to=end,
+        events_count=len(events),
+        total_costs=total_costs,
+        total_revenue=total_revenue,
+        net_profit=net_profit,
+        profit_margin=round(profit_margin, 2)
+    )
 
+
+# ==================== CATEGORIES ====================
 
 @app.get("/api/stats/categories", response_model=CategoriesResponse)
 def get_categories(current_user: User = Depends(get_current_user)):
-    """Get all available categories and enums"""
-    return {
-        "cost_categories": [
-            {"value": c.value, "label": c.value.replace("_", " ").title()} 
-            for c in CostCategory
-        ],
-        "revenue_sources": [
-            {"value": s.value, "label": s.value.replace("_", " ").title()} 
-            for s in RevenueSource
-        ],
-        "user_roles": [
-            {"value": r.value, "label": r.value.title()} 
-            for r in UserRole
-        ],
-        "receipt_statuses": [
-            {"value": s.value, "label": s.value.replace("_", " ").title()} 
-            for s in ReceiptStatus
-        ]
+    cost_categories = {
+        "bar_alcohol": "🍺 Alkohol (bar)",
+        "bar_beverages": "🥤 Napoje (bar)",
+        "bar_food": "🍕 Jedzenie (bar)",
+        "bar_supplies": "📦 Zaopatrzenie (bar)",
+        "artist_fee": "🎤 Honorarium artysty",
+        "sound_engineer": "🎚️ Realizator dźwięku",
+        "lighting": "💡 Oświetlenie",
+        "staff_wages": "👥 Wynagrodzenia",
+        "security": "🛡️ Ochrona",
+        "cleaning": "🧹 Sprzątanie",
+        "utilities": "⚡ Media",
+        "rent": "🏠 Wynajem",
+        "equipment": "🔧 Sprzęt",
+        "marketing": "📢 Marketing",
+        "other": "📋 Inne"
     }
-
-
-# ==================== STATIC FILES (Frontend) ====================
-# Serve frontend from multiple possible locations
-
-def find_frontend_path():
-    """Find frontend directory - works both locally and on Render"""
-    possible_paths = [
-        Path(__file__).parent.parent / "frontend",  # ../frontend from backend
-        Path(__file__).parent / "frontend",          # ./frontend
-        Path("/opt/render/project/src/frontend"),    # Render absolute path
-        Path("frontend"),                             # Relative to CWD
-    ]
-    for path in possible_paths:
-        if path.exists() and (path / "index.html").exists():
-            return path
-    return None
-
-
-frontend_path = find_frontend_path()
-
-if frontend_path:
-    print(f"✅ Frontend found at: {frontend_path}")
     
-    @app.get("/app")
-    @app.get("/app/{full_path:path}")
-    async def serve_frontend(full_path: str = ""):
-        if full_path and (frontend_path / full_path).exists():
-            return FileResponse(frontend_path / full_path)
-        return FileResponse(frontend_path / "index.html")
+    revenue_sources = {
+        "box_office": "🎫 Sprzedaż biletów",
+        "bar_sales": "🍻 Sprzedaż bar",
+        "merchandise": "👕 Merchandise",
+        "sponsorship": "🤝 Sponsoring",
+        "other": "💰 Inne"
+    }
     
-    # Mount static files for CSS, JS, images
-    app.mount("/static", StaticFiles(directory=frontend_path), name="static")
-else:
-    print("⚠️ Frontend directory not found - API only mode")
+    return CategoriesResponse(
+        cost_categories=cost_categories,
+        revenue_sources=revenue_sources
+    )
+
+
+# ==================== FRONTEND SERVING ====================
+
+# Determine frontend path
+FRONTEND_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend")
+if not os.path.exists(FRONTEND_PATH):
+    FRONTEND_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")
+if not os.path.exists(FRONTEND_PATH):
+    FRONTEND_PATH = "/opt/render/project/src/frontend"
+
+print(f"✅ Frontend path: {FRONTEND_PATH}")
+
+
+@app.get("/app/{full_path:path}")
+@app.get("/app")
+async def serve_frontend(full_path: str = ""):
+    """Serve frontend files"""
+    if not os.path.exists(FRONTEND_PATH):
+        return HTMLResponse(content="<h1>Frontend not found</h1>", status_code=404)
     
-    @app.get("/app")
-    @app.get("/app/{full_path:path}")
-    async def no_frontend(full_path: str = ""):
-        return {"error": "Frontend not deployed. Use API directly at /docs"}
+    if not full_path or full_path == "":
+        file_path = os.path.join(FRONTEND_PATH, "index.html")
+    else:
+        file_path = os.path.join(FRONTEND_PATH, full_path)
+    
+    if os.path.exists(file_path) and os.path.isfile(file_path):
+        return FileResponse(file_path)
+    
+    # SPA fallback
+    index_path = os.path.join(FRONTEND_PATH, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    
+    return HTMLResponse(content="<h1>File not found</h1>", status_code=404)

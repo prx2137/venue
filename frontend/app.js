@@ -1,28 +1,44 @@
 /**
  * Music Venue Management System - Frontend Application
- * Version 2.0 with Receipt OCR Support
+ * Version 3.0 with Live Chat Support
  */
 
 // ==================== CONFIGURATION ====================
-const CONFIG = window.APP_CONFIG || {
-    API_URL: window.location.origin
-};
 
-const API_URL = CONFIG.API_URL;
+const API_URL = typeof window.APP_CONFIG !== 'undefined' 
+    ? window.APP_CONFIG.API_URL 
+    : (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+        ? 'http://localhost:8000'
+        : window.location.origin;
+
+// WebSocket URL
+const WS_URL = API_URL.replace('http://', 'ws://').replace('https://', 'wss://');
 
 // ==================== STATE ====================
+
 let state = {
-    token: localStorage.getItem('token'),
-    user: JSON.parse(localStorage.getItem('user') || 'null'),
-    currentView: 'dashboard',
+    user: null,
+    token: null,
     events: [],
     costs: [],
     revenues: [],
     receipts: [],
-    categories: null
+    users: [],
+    categories: null,
+    chatMessages: [],
+    chatUsers: [],
+    unreadCount: 0,
+    ws: null,
+    wsReconnectAttempts: 0
 };
 
+// ==================== DOM ELEMENTS ====================
+
+const $ = (selector) => document.querySelector(selector);
+const $$ = (selector) => document.querySelectorAll(selector);
+
 // ==================== API HELPERS ====================
+
 async function api(endpoint, options = {}) {
     const headers = {
         'Content-Type': 'application/json',
@@ -47,7 +63,7 @@ async function api(endpoint, options = {}) {
         const data = await response.json();
         
         if (!response.ok) {
-            throw new Error(data.detail || 'Błąd API');
+            throw new Error(data.detail || 'Błąd serwera');
         }
         
         return data;
@@ -57,401 +73,589 @@ async function api(endpoint, options = {}) {
     }
 }
 
-async function apiFormData(endpoint, formData) {
-    const headers = {};
-    if (state.token) {
-        headers['Authorization'] = `Bearer ${state.token}`;
-    }
-    
-    const response = await fetch(`${API_URL}${endpoint}`, {
-        method: 'POST',
-        headers,
-        body: formData
-    });
-    
-    const data = await response.json();
-    if (!response.ok) {
-        throw new Error(data.detail || 'Błąd uploadu');
-    }
-    return data;
-}
-
 // ==================== AUTH ====================
+
 async function login(email, password) {
-    const data = await api('/api/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ email, password })
-    });
-    
-    state.token = data.access_token;
-    state.user = data.user;
-    localStorage.setItem('token', data.access_token);
-    localStorage.setItem('user', JSON.stringify(data.user));
-    
-    showApp();
-    loadCategories();
-    showDashboard();
+    try {
+        const data = await api('/api/auth/login', {
+            method: 'POST',
+            body: JSON.stringify({ email, password })
+        });
+        
+        state.token = data.access_token;
+        state.user = data.user;
+        
+        localStorage.setItem('token', state.token);
+        localStorage.setItem('user', JSON.stringify(state.user));
+        
+        showApp();
+        connectWebSocket();
+        toast('Zalogowano pomyślnie!', 'success');
+    } catch (error) {
+        throw error;
+    }
 }
 
 function logout() {
     state.token = null;
     state.user = null;
+    state.ws?.close();
+    state.ws = null;
+    
     localStorage.removeItem('token');
     localStorage.removeItem('user');
+    
     showLogin();
 }
 
-async function register(email, password, fullName) {
-    await api('/api/auth/register', {
-        method: 'POST',
-        body: JSON.stringify({ email, password, full_name: fullName })
-    });
-    showToast('Konto utworzone! Możesz się zalogować.', 'success');
-    document.getElementById('registerForm').reset();
-    document.getElementById('loginTab').click();
+function checkAuth() {
+    const token = localStorage.getItem('token');
+    const user = localStorage.getItem('user');
+    
+    if (token && user) {
+        state.token = token;
+        state.user = JSON.parse(user);
+        showApp();
+        connectWebSocket();
+    } else {
+        showLogin();
+    }
 }
 
-// ==================== UI HELPERS ====================
-function showToast(message, type = 'info') {
-    const toast = document.createElement('div');
-    toast.className = `toast toast-${type}`;
-    toast.textContent = message;
-    document.body.appendChild(toast);
+// ==================== WEBSOCKET CHAT ====================
+
+function connectWebSocket() {
+    if (!state.token) return;
     
-    setTimeout(() => toast.classList.add('show'), 10);
-    setTimeout(() => {
-        toast.classList.remove('show');
-        setTimeout(() => toast.remove(), 300);
+    const wsUrl = `${WS_URL}/ws/chat/${state.token}`;
+    
+    try {
+        state.ws = new WebSocket(wsUrl);
+        
+        state.ws.onopen = () => {
+            console.log('✅ WebSocket connected');
+            state.wsReconnectAttempts = 0;
+            loadChatHistory();
+        };
+        
+        state.ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            handleWebSocketMessage(data);
+        };
+        
+        state.ws.onclose = (event) => {
+            console.log('WebSocket closed:', event.code);
+            // Reconnect with exponential backoff
+            if (state.token && state.wsReconnectAttempts < 5) {
+                const delay = Math.min(1000 * Math.pow(2, state.wsReconnectAttempts), 30000);
+                state.wsReconnectAttempts++;
+                setTimeout(connectWebSocket, delay);
+            }
+        };
+        
+        state.ws.onerror = (error) => {
+            console.error('WebSocket error:', error);
+        };
+    } catch (error) {
+        console.error('WebSocket connection failed:', error);
+        // Fallback to REST polling
+        startChatPolling();
+    }
+}
+
+function handleWebSocketMessage(data) {
+    switch (data.type) {
+        case 'new_message':
+            addChatMessage(data.data);
+            if (data.data.sender_id !== state.user.id && !$('#chat-panel').classList.contains('active')) {
+                state.unreadCount++;
+                updateChatBadge();
+                toast(`${data.data.sender_name}: ${data.data.content.substring(0, 50)}...`, 'info');
+            }
+            break;
+            
+        case 'user_online':
+            updateUserStatus(data.data.user_id, true, data.data.full_name);
+            break;
+            
+        case 'user_offline':
+            updateUserStatus(data.data.user_id, false, data.data.full_name);
+            break;
+            
+        case 'user_typing':
+            showTypingIndicator(data.data.full_name);
+            break;
+            
+        case 'pong':
+            // Keep-alive response
+            break;
+    }
+}
+
+function sendChatMessage(content) {
+    if (state.ws?.readyState === WebSocket.OPEN) {
+        state.ws.send(JSON.stringify({
+            type: 'message',
+            content: content
+        }));
+    } else {
+        // Fallback to REST
+        sendChatMessageREST(content);
+    }
+}
+
+async function sendChatMessageREST(content) {
+    try {
+        const data = await api('/api/chat/messages', {
+            method: 'POST',
+            body: JSON.stringify({ content, message_type: 'text' })
+        });
+        addChatMessage(data);
+    } catch (error) {
+        toast('Nie udało się wysłać wiadomości', 'error');
+    }
+}
+
+function sendTypingIndicator() {
+    if (state.ws?.readyState === WebSocket.OPEN) {
+        state.ws.send(JSON.stringify({ type: 'typing' }));
+    }
+}
+
+let typingTimeout = null;
+function showTypingIndicator(userName) {
+    if (userName === state.user.full_name) return;
+    
+    $('#typing-user').textContent = userName;
+    $('#typing-indicator').classList.remove('hidden');
+    
+    clearTimeout(typingTimeout);
+    typingTimeout = setTimeout(() => {
+        $('#typing-indicator').classList.add('hidden');
     }, 3000);
 }
 
+async function loadChatHistory() {
+    try {
+        const data = await api('/api/chat/history?limit=100');
+        state.chatMessages = data.messages;
+        state.chatUsers = data.users_online;
+        state.unreadCount = data.total_unread;
+        
+        renderChatMessages();
+        renderChatUsers();
+        updateChatBadge();
+    } catch (error) {
+        console.error('Failed to load chat history:', error);
+    }
+}
+
+function renderChatMessages() {
+    const container = $('#chat-messages');
+    container.innerHTML = '';
+    
+    state.chatMessages.forEach(msg => {
+        const isOwn = msg.sender_id === state.user.id;
+        const isSystem = msg.message_type === 'system';
+        
+        const messageEl = document.createElement('div');
+        messageEl.className = `chat-message ${isOwn ? 'own' : 'other'} ${isSystem ? 'system' : ''}`;
+        
+        if (!isSystem) {
+            messageEl.innerHTML = `
+                <div class="message-header">
+                    <span class="message-sender">${escapeHtml(msg.sender_name)}</span>
+                    <span class="message-role">${getRoleLabel(msg.sender_role)}</span>
+                    <span class="message-time">${formatTime(msg.created_at)}</span>
+                </div>
+                <div class="message-content">${escapeHtml(msg.content)}</div>
+            `;
+        } else {
+            messageEl.innerHTML = `<div class="message-content">${escapeHtml(msg.content)}</div>`;
+        }
+        
+        container.appendChild(messageEl);
+    });
+    
+    // Scroll to bottom
+    container.scrollTop = container.scrollHeight;
+}
+
+function addChatMessage(msg) {
+    state.chatMessages.push(msg);
+    
+    const container = $('#chat-messages');
+    const isOwn = msg.sender_id === state.user.id;
+    const isSystem = msg.message_type === 'system';
+    
+    const messageEl = document.createElement('div');
+    messageEl.className = `chat-message ${isOwn ? 'own' : 'other'} ${isSystem ? 'system' : ''}`;
+    
+    if (!isSystem) {
+        messageEl.innerHTML = `
+            <div class="message-header">
+                <span class="message-sender">${escapeHtml(msg.sender_name)}</span>
+                <span class="message-role">${getRoleLabel(msg.sender_role)}</span>
+                <span class="message-time">${formatTime(msg.created_at)}</span>
+            </div>
+            <div class="message-content">${escapeHtml(msg.content)}</div>
+        `;
+    } else {
+        messageEl.innerHTML = `<div class="message-content">${escapeHtml(msg.content)}</div>`;
+    }
+    
+    container.appendChild(messageEl);
+    container.scrollTop = container.scrollHeight;
+}
+
+function renderChatUsers() {
+    const container = $('#users-online');
+    container.innerHTML = '';
+    
+    const onlineUsers = state.chatUsers.filter(u => u.is_online);
+    const offlineUsers = state.chatUsers.filter(u => !u.is_online);
+    
+    $('#online-count').textContent = onlineUsers.length;
+    
+    [...onlineUsers, ...offlineUsers].forEach(user => {
+        const chip = document.createElement('div');
+        chip.className = `user-chip ${user.role}`;
+        chip.innerHTML = `
+            <span class="status-dot ${user.is_online ? 'online' : ''}"></span>
+            <span>${escapeHtml(user.full_name)}</span>
+        `;
+        container.appendChild(chip);
+    });
+}
+
+function updateUserStatus(userId, isOnline, fullName) {
+    const user = state.chatUsers.find(u => u.user_id === userId);
+    if (user) {
+        user.is_online = isOnline;
+    } else {
+        state.chatUsers.push({
+            user_id: userId,
+            full_name: fullName,
+            is_online: isOnline
+        });
+    }
+    renderChatUsers();
+}
+
+function updateChatBadge() {
+    const badge = $('#chat-badge');
+    if (state.unreadCount > 0) {
+        badge.textContent = state.unreadCount > 99 ? '99+' : state.unreadCount;
+        badge.classList.remove('hidden');
+    } else {
+        badge.classList.add('hidden');
+    }
+}
+
+async function markMessagesRead() {
+    if (state.unreadCount > 0) {
+        try {
+            await api('/api/chat/mark-read', { method: 'POST' });
+            state.unreadCount = 0;
+            updateChatBadge();
+        } catch (error) {
+            console.error('Failed to mark messages as read:', error);
+        }
+    }
+}
+
+function startChatPolling() {
+    // Fallback polling if WebSocket fails
+    setInterval(async () => {
+        if (!$('#chat-panel').classList.contains('active')) return;
+        await loadChatHistory();
+    }, 5000);
+}
+
+// Keep-alive ping
+setInterval(() => {
+    if (state.ws?.readyState === WebSocket.OPEN) {
+        state.ws.send(JSON.stringify({ type: 'ping' }));
+    }
+}, 30000);
+
+// ==================== UI HELPERS ====================
+
 function showLogin() {
-    document.getElementById('loginPage').style.display = 'flex';
-    document.getElementById('appPage').style.display = 'none';
+    $('#login-screen').classList.add('active');
+    $('#main-app').classList.remove('active');
 }
 
 function showApp() {
-    document.getElementById('loginPage').style.display = 'none';
-    document.getElementById('appPage').style.display = 'flex';
+    $('#login-screen').classList.remove('active');
+    $('#main-app').classList.add('active');
     
-    document.getElementById('userName').textContent = state.user?.full_name || 'Użytkownik';
-    document.getElementById('userRole').textContent = getRoleLabel(state.user?.role);
+    $('#user-name').textContent = state.user.full_name;
+    $('#user-role-badge').textContent = getRoleLabel(state.user.role);
     
-    // Hide admin menu for workers
-    const adminItems = document.querySelectorAll('.admin-only');
-    adminItems.forEach(item => {
-        item.style.display = ['owner', 'manager'].includes(state.user?.role) ? 'block' : 'none';
-    });
+    // Show admin menu for owner/manager
+    if (['owner', 'manager'].includes(state.user.role)) {
+        $('#users-nav').classList.remove('hidden');
+    }
+    
+    loadInitialData();
 }
 
 function getRoleLabel(role) {
-    const labels = { owner: 'Właściciel', manager: 'Manager', worker: 'Pracownik' };
+    const labels = {
+        owner: 'Właściciel',
+        manager: 'Manager',
+        worker: 'Pracownik'
+    };
     return labels[role] || role;
 }
 
+function formatMoney(amount) {
+    return new Intl.NumberFormat('pl-PL', {
+        style: 'currency',
+        currency: 'PLN'
+    }).format(amount);
+}
+
 function formatDate(dateStr) {
-    if (!dateStr) return '-';
-    return new Date(dateStr).toLocaleDateString('pl-PL');
+    return new Date(dateStr).toLocaleDateString('pl-PL', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+    });
+}
+
+function formatTime(dateStr) {
+    return new Date(dateStr).toLocaleTimeString('pl-PL', {
+        hour: '2-digit',
+        minute: '2-digit'
+    });
 }
 
 function formatDateTime(dateStr) {
-    if (!dateStr) return '-';
-    return new Date(dateStr).toLocaleString('pl-PL');
-}
-
-function formatCurrency(amount) {
-    return new Intl.NumberFormat('pl-PL', { style: 'currency', currency: 'PLN' }).format(amount || 0);
-}
-
-function getCategoryLabel(category) {
-    const labels = {
-        bar_alcohol: '🍺 Alkohol',
-        bar_beverages: '🥤 Napoje',
-        bar_food: '🍕 Jedzenie',
-        bar_supplies: '📦 Zaopatrzenie bar',
-        staff_wages: '👥 Wynagrodzenia',
-        equipment_rental: '🎸 Wynajem sprzętu',
-        marketing: '📢 Marketing',
-        utilities: '💡 Media',
-        maintenance: '🔧 Konserwacja',
-        cleaning: '🧹 Sprzątanie',
-        security: '🛡️ Ochrona',
-        artist_fee: '🎤 Honorarium artysty',
-        sound_engineer: '🎚️ Realizator dźwięku',
-        lighting: '💡 Oświetlenie',
-        licenses: '📄 Licencje',
-        insurance: '🏥 Ubezpieczenia',
-        other: '📋 Inne'
-    };
-    return labels[category] || category;
-}
-
-function getRevenueLabel(source) {
-    const labels = {
-        box_office: '🎫 Bilety',
-        bar_sales: '🍺 Sprzedaż bar',
-        merchandise: '👕 Merchandise',
-        sponsorship: '🤝 Sponsoring',
-        rental: '🏠 Wynajem',
-        other: '📋 Inne'
-    };
-    return labels[source] || source;
-}
-
-function getStatusBadge(status) {
-    const badges = {
-        pending: '<span class="badge badge-warning">Oczekuje</span>',
-        processing: '<span class="badge badge-info">Przetwarzanie</span>',
-        processed: '<span class="badge badge-primary">Przetworzony</span>',
-        verified: '<span class="badge badge-success">Zweryfikowany</span>',
-        rejected: '<span class="badge badge-danger">Odrzucony</span>',
-        planned: '<span class="badge badge-info">Planowane</span>',
-        completed: '<span class="badge badge-success">Zakończone</span>',
-        cancelled: '<span class="badge badge-danger">Anulowane</span>'
-    };
-    return badges[status] || `<span class="badge">${status}</span>`;
-}
-
-// ==================== LOAD CATEGORIES ====================
-async function loadCategories() {
-    try {
-        state.categories = await api('/api/stats/categories');
-    } catch (e) {
-        console.error('Error loading categories:', e);
-    }
-}
-
-// ==================== VIEWS ====================
-function setActiveNav(viewId) {
-    document.querySelectorAll('.nav-item').forEach(item => {
-        item.classList.remove('active');
+    return new Date(dateStr).toLocaleString('pl-PL', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
     });
-    const activeItem = document.querySelector(`[data-view="${viewId}"]`);
-    if (activeItem) activeItem.classList.add('active');
 }
 
-function showView(viewId) {
-    state.currentView = viewId;
-    setActiveNav(viewId);
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function toast(message, type = 'info') {
+    const container = $('#toast-container');
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = message;
+    container.appendChild(toast);
     
-    const content = document.getElementById('mainContent');
-    
-    switch(viewId) {
-        case 'dashboard': showDashboard(); break;
-        case 'events': showEvents(); break;
-        case 'costs': showCosts(); break;
-        case 'revenue': showRevenue(); break;
-        case 'receipts': showReceipts(); break;
-        case 'reports': showReports(); break;
-        case 'users': showUsers(); break;
-        default: showDashboard();
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        setTimeout(() => toast.remove(), 300);
+    }, 4000);
+}
+
+// ==================== MODAL ====================
+
+function showModal(title, content) {
+    $('#modal-title').textContent = title;
+    $('#modal-body').innerHTML = content;
+    $('#modal').classList.add('active');
+}
+
+function hideModal() {
+    $('#modal').classList.remove('active');
+}
+
+// ==================== DATA LOADING ====================
+
+async function loadInitialData() {
+    try {
+        await Promise.all([
+            loadEvents(),
+            loadCategories()
+        ]);
+        updateDashboard();
+    } catch (error) {
+        console.error('Failed to load initial data:', error);
     }
+}
+
+async function loadEvents() {
+    state.events = await api('/api/events');
+    updateEventSelects();
+}
+
+async function loadCategories() {
+    state.categories = await api('/api/stats/categories');
+}
+
+async function loadUsers() {
+    if (['owner', 'manager'].includes(state.user.role)) {
+        state.users = await api('/api/users');
+    }
+}
+
+function updateEventSelects() {
+    const selects = ['#cost-event-filter', '#revenue-event-filter', '#report-event-select'];
+    const options = state.events.map(e => 
+        `<option value="${e.id}">${escapeHtml(e.name)} (${formatDate(e.event_date)})</option>`
+    ).join('');
+    
+    selects.forEach(sel => {
+        const select = $(sel);
+        if (select) {
+            const firstOption = select.querySelector('option:first-child');
+            select.innerHTML = '';
+            if (firstOption) select.appendChild(firstOption);
+            select.innerHTML += options;
+        }
+    });
 }
 
 // ==================== DASHBOARD ====================
-async function showDashboard() {
-    const content = document.getElementById('mainContent');
-    content.innerHTML = '<div class="loading">Ładowanie...</div>';
+
+async function updateDashboard() {
+    const totalEvents = state.events.length;
+    let totalCosts = 0;
+    let totalRevenue = 0;
     
-    try {
-        const [eventsData, costsData] = await Promise.all([
-            api('/api/events?limit=5'),
-            api('/api/costs?limit=10')
-        ]);
-        
-        const totalCosts = costsData.reduce((sum, c) => sum + c.amount, 0);
-        
-        content.innerHTML = `
-            <div class="dashboard">
-                <h1>📊 Panel główny</h1>
-                
-                <div class="stats-grid">
-                    <div class="stat-card">
-                        <div class="stat-icon">🎵</div>
-                        <div class="stat-info">
-                            <span class="stat-value">${eventsData.total}</span>
-                            <span class="stat-label">Wydarzenia</span>
-                        </div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon">💰</div>
-                        <div class="stat-info">
-                            <span class="stat-value">${formatCurrency(totalCosts)}</span>
-                            <span class="stat-label">Koszty (ostatnie)</span>
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="dashboard-sections">
-                    <div class="dashboard-section">
-                        <h3>🎤 Ostatnie wydarzenia</h3>
-                        ${eventsData.events.length ? `
-                            <ul class="event-list">
-                                ${eventsData.events.map(e => `
-                                    <li class="event-item" onclick="showEventDetail(${e.id})">
-                                        <strong>${e.name}</strong>
-                                        <span>${formatDate(e.date)}</span>
-                                        ${getStatusBadge(e.status)}
-                                    </li>
-                                `).join('')}
-                            </ul>
-                        ` : '<p class="empty-state">Brak wydarzeń</p>'}
-                    </div>
-                    
-                    <div class="dashboard-section">
-                        <h3>📝 Ostatnie koszty</h3>
-                        ${costsData.length ? `
-                            <ul class="cost-list">
-                                ${costsData.slice(0, 5).map(c => `
-                                    <li class="cost-item">
-                                        <span>${getCategoryLabel(c.category)}</span>
-                                        <strong>${formatCurrency(c.amount)}</strong>
-                                    </li>
-                                `).join('')}
-                            </ul>
-                        ` : '<p class="empty-state">Brak kosztów</p>'}
-                    </div>
-                </div>
-                
-                <div class="quick-actions">
-                    <h3>⚡ Szybkie akcje</h3>
-                    <div class="action-buttons">
-                        <button class="btn btn-primary" onclick="showAddEventModal()">➕ Nowe wydarzenie</button>
-                        <button class="btn btn-secondary" onclick="showAddCostModal()">💸 Dodaj koszt</button>
-                        <button class="btn btn-success" onclick="showUploadReceiptModal()">📷 Dodaj paragon</button>
-                    </div>
-                </div>
-            </div>
-        `;
-    } catch (error) {
-        content.innerHTML = `<div class="error">Błąd: ${error.message}</div>`;
+    // Calculate totals from all events
+    for (const event of state.events) {
+        try {
+            const costs = await api(`/api/costs/event/${event.id}`);
+            const revenues = await api(`/api/revenue/event/${event.id}`);
+            totalCosts += costs.reduce((sum, c) => sum + c.amount, 0);
+            totalRevenue += revenues.reduce((sum, r) => sum + r.amount, 0);
+        } catch (e) {
+            // Skip failed requests
+        }
     }
+    
+    $('#total-events').textContent = totalEvents;
+    $('#total-costs').textContent = formatMoney(totalCosts);
+    $('#total-revenue').textContent = formatMoney(totalRevenue);
+    $('#total-profit').textContent = formatMoney(totalRevenue - totalCosts);
+    
+    // Recent events
+    const recentEvents = state.events.slice(0, 5);
+    $('#recent-events').innerHTML = recentEvents.length ? recentEvents.map(e => `
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">🎪 ${escapeHtml(e.name)}</div>
+                    <div class="card-subtitle">${formatDate(e.event_date)}</div>
+                </div>
+                <span class="card-tag">${e.venue_capacity} miejsc</span>
+            </div>
+        </div>
+    `).join('') : '<p class="text-center" style="color: var(--text-muted)">Brak wydarzeń</p>';
 }
 
 // ==================== EVENTS ====================
-async function showEvents() {
-    const content = document.getElementById('mainContent');
-    content.innerHTML = '<div class="loading">Ładowanie wydarzeń...</div>';
+
+function renderEvents() {
+    const list = $('#events-list');
     
-    try {
-        const data = await api('/api/events');
-        state.events = data.events;
-        
-        content.innerHTML = `
-            <div class="page-header">
-                <h1>🎵 Wydarzenia</h1>
-                <button class="btn btn-primary" onclick="showAddEventModal()">➕ Nowe wydarzenie</button>
-            </div>
-            
-            <div class="table-container">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Nazwa</th>
-                            <th>Data</th>
-                            <th>Status</th>
-                            <th>Pojemność</th>
-                            <th>Cena biletu</th>
-                            <th>Akcje</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${data.events.map(e => `
-                            <tr>
-                                <td><strong>${e.name}</strong></td>
-                                <td>${formatDateTime(e.date)}</td>
-                                <td>${getStatusBadge(e.status)}</td>
-                                <td>${e.capacity || '-'}</td>
-                                <td>${e.ticket_price ? formatCurrency(e.ticket_price) : '-'}</td>
-                                <td class="actions">
-                                    <button class="btn btn-sm" onclick="showEventDetail(${e.id})">👁️</button>
-                                    <button class="btn btn-sm" onclick="editEvent(${e.id})">✏️</button>
-                                    <button class="btn btn-sm btn-danger" onclick="deleteEvent(${e.id})">🗑️</button>
-                                </td>
-                            </tr>
-                        `).join('')}
-                    </tbody>
-                </table>
-            </div>
-        `;
-    } catch (error) {
-        content.innerHTML = `<div class="error">Błąd: ${error.message}</div>`;
+    if (!state.events.length) {
+        list.innerHTML = '<p class="text-center" style="color: var(--text-muted)">Brak wydarzeń</p>';
+        return;
     }
+    
+    list.innerHTML = state.events.map(e => `
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">🎪 ${escapeHtml(e.name)}</div>
+                    <div class="card-subtitle">${formatDateTime(e.event_date)}</div>
+                </div>
+                <span class="card-tag">${e.venue_capacity} miejsc</span>
+            </div>
+            <div class="card-body">
+                ${e.description ? escapeHtml(e.description) : 'Brak opisu'}
+            </div>
+            <div class="card-footer">
+                <span class="card-amount">${formatMoney(e.ticket_price)} / bilet</span>
+                <div class="card-actions">
+                    <button class="btn btn-small btn-secondary" onclick="editEvent(${e.id})">✏️</button>
+                    <button class="btn btn-small btn-danger" onclick="deleteEvent(${e.id})">🗑️</button>
+                </div>
+            </div>
+        </div>
+    `).join('');
 }
 
-function showAddEventModal() {
-    const modal = document.getElementById('modal');
-    const modalContent = document.getElementById('modalContent');
-    
-    modalContent.innerHTML = `
-        <h2>➕ Nowe wydarzenie</h2>
-        <form id="eventForm" onsubmit="saveEvent(event)">
+function showEventForm(event = null) {
+    const isEdit = !!event;
+    const html = `
+        <form id="event-form">
             <div class="form-group">
                 <label>Nazwa wydarzenia *</label>
-                <input type="text" name="name" required>
+                <input type="text" name="name" value="${event?.name || ''}" required>
             </div>
             <div class="form-group">
-                <label>Data i godzina *</label>
-                <input type="datetime-local" name="date" required>
+                <label>Data wydarzenia *</label>
+                <input type="datetime-local" name="event_date" value="${event ? new Date(event.event_date).toISOString().slice(0, 16) : ''}" required>
+            </div>
+            <div class="form-group">
+                <label>Pojemność</label>
+                <input type="number" name="venue_capacity" value="${event?.venue_capacity || 0}" min="0">
+            </div>
+            <div class="form-group">
+                <label>Cena biletu (PLN)</label>
+                <input type="number" name="ticket_price" value="${event?.ticket_price || 0}" min="0" step="0.01">
             </div>
             <div class="form-group">
                 <label>Opis</label>
-                <textarea name="description" rows="3"></textarea>
-            </div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>Pojemność</label>
-                    <input type="number" name="capacity" min="0">
-                </div>
-                <div class="form-group">
-                    <label>Cena biletu (PLN)</label>
-                    <input type="number" name="ticket_price" min="0" step="0.01">
-                </div>
-            </div>
-            <div class="form-group">
-                <label>Status</label>
-                <select name="status">
-                    <option value="planned">Planowane</option>
-                    <option value="confirmed">Potwierdzone</option>
-                    <option value="completed">Zakończone</option>
-                    <option value="cancelled">Anulowane</option>
-                </select>
+                <textarea name="description">${event?.description || ''}</textarea>
             </div>
             <div class="form-actions">
-                <button type="button" class="btn" onclick="closeModal()">Anuluj</button>
-                <button type="submit" class="btn btn-primary">Zapisz</button>
+                <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
+                <button type="submit" class="btn btn-primary">${isEdit ? 'Zapisz' : 'Dodaj'}</button>
             </div>
         </form>
     `;
     
-    modal.style.display = 'flex';
+    showModal(isEdit ? 'Edytuj wydarzenie' : 'Nowe wydarzenie', html);
+    
+    $('#event-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = {
+            name: formData.get('name'),
+            event_date: new Date(formData.get('event_date')).toISOString(),
+            venue_capacity: parseInt(formData.get('venue_capacity')) || 0,
+            ticket_price: parseFloat(formData.get('ticket_price')) || 0,
+            description: formData.get('description')
+        };
+        
+        try {
+            if (isEdit) {
+                await api(`/api/events/${event.id}`, { method: 'PUT', body: JSON.stringify(data) });
+                toast('Wydarzenie zaktualizowane', 'success');
+            } else {
+                await api('/api/events', { method: 'POST', body: JSON.stringify(data) });
+                toast('Wydarzenie dodane', 'success');
+            }
+            hideModal();
+            await loadEvents();
+            renderEvents();
+            updateDashboard();
+        } catch (error) {
+            toast(error.message, 'error');
+        }
+    };
 }
 
-async function saveEvent(e) {
-    e.preventDefault();
-    const form = e.target;
-    const formData = new FormData(form);
-    
-    const data = {
-        name: formData.get('name'),
-        date: new Date(formData.get('date')).toISOString(),
-        description: formData.get('description') || null,
-        capacity: formData.get('capacity') ? parseInt(formData.get('capacity')) : null,
-        ticket_price: formData.get('ticket_price') ? parseFloat(formData.get('ticket_price')) : null,
-        status: formData.get('status')
-    };
-    
-    try {
-        await api('/api/events', {
-            method: 'POST',
-            body: JSON.stringify(data)
-        });
-        closeModal();
-        showToast('Wydarzenie utworzone!', 'success');
-        showEvents();
-    } catch (error) {
-        showToast(error.message, 'error');
-    }
+function editEvent(id) {
+    const event = state.events.find(e => e.id === id);
+    if (event) showEventForm(event);
 }
 
 async function deleteEvent(id) {
@@ -459,188 +663,131 @@ async function deleteEvent(id) {
     
     try {
         await api(`/api/events/${id}`, { method: 'DELETE' });
-        showToast('Wydarzenie usunięte', 'success');
-        showEvents();
+        toast('Wydarzenie usunięte', 'success');
+        await loadEvents();
+        renderEvents();
+        updateDashboard();
     } catch (error) {
-        showToast(error.message, 'error');
+        toast(error.message, 'error');
     }
 }
 
 // ==================== COSTS ====================
-async function showCosts() {
-    const content = document.getElementById('mainContent');
-    content.innerHTML = '<div class="loading">Ładowanie kosztów...</div>';
-    
-    try {
-        const data = await api('/api/costs');
-        state.costs = data;
-        
-        const totalByCategory = {};
-        data.forEach(c => {
-            totalByCategory[c.category] = (totalByCategory[c.category] || 0) + c.amount;
-        });
-        
-        content.innerHTML = `
-            <div class="page-header">
-                <h1>💸 Koszty</h1>
-                <div class="header-actions">
-                    <button class="btn btn-success" onclick="showUploadReceiptModal()">📷 Dodaj paragon</button>
-                    <button class="btn btn-primary" onclick="showAddCostModal()">➕ Dodaj koszt</button>
-                </div>
-            </div>
-            
-            <div class="costs-summary">
-                <h3>Podsumowanie według kategorii</h3>
-                <div class="category-grid">
-                    ${Object.entries(totalByCategory).map(([cat, amount]) => `
-                        <div class="category-card">
-                            <span class="cat-label">${getCategoryLabel(cat)}</span>
-                            <span class="cat-amount">${formatCurrency(amount)}</span>
-                        </div>
-                    `).join('')}
-                </div>
-            </div>
-            
-            <div class="table-container">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Kategoria</th>
-                            <th>Kwota</th>
-                            <th>Opis</th>
-                            <th>Dostawca</th>
-                            <th>Data</th>
-                            <th>Paragon</th>
-                            <th>Akcje</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${data.map(c => `
-                            <tr>
-                                <td>${getCategoryLabel(c.category)}</td>
-                                <td><strong>${formatCurrency(c.amount)}</strong></td>
-                                <td>${c.description || '-'}</td>
-                                <td>${c.vendor || '-'}</td>
-                                <td>${formatDate(c.cost_date || c.created_at)}</td>
-                                <td>${c.receipt_id ? `<button class="btn btn-sm" onclick="viewReceipt(${c.receipt_id})">📷</button>` : '-'}</td>
-                                <td class="actions">
-                                    <button class="btn btn-sm" onclick="editCost(${c.id})">✏️</button>
-                                    <button class="btn btn-sm btn-danger" onclick="deleteCost(${c.id})">🗑️</button>
-                                </td>
-                            </tr>
-                        `).join('')}
-                    </tbody>
-                </table>
-            </div>
-        `;
-    } catch (error) {
-        content.innerHTML = `<div class="error">Błąd: ${error.message}</div>`;
+
+async function loadCosts(eventId = null) {
+    if (eventId) {
+        state.costs = await api(`/api/costs/event/${eventId}`);
+    } else {
+        state.costs = [];
+        for (const event of state.events) {
+            const costs = await api(`/api/costs/event/${event.id}`);
+            state.costs.push(...costs.map(c => ({ ...c, eventName: event.name })));
+        }
     }
+    renderCosts();
 }
 
-function showAddCostModal(eventId = null) {
-    const modal = document.getElementById('modal');
-    const modalContent = document.getElementById('modalContent');
+function renderCosts() {
+    const list = $('#costs-list');
     
-    const categoryOptions = state.categories?.cost_categories?.map(c => 
-        `<option value="${c.value}">${getCategoryLabel(c.value)}</option>`
-    ).join('') || '';
+    if (!state.costs.length) {
+        list.innerHTML = '<p class="text-center" style="color: var(--text-muted)">Brak kosztów</p>';
+        return;
+    }
     
-    modalContent.innerHTML = `
-        <h2>💸 Dodaj koszt</h2>
-        <form id="costForm" onsubmit="saveCost(event)">
+    list.innerHTML = state.costs.map(c => {
+        const categoryLabel = state.categories?.cost_categories?.[c.category] || c.category;
+        const event = state.events.find(e => e.id === c.event_id);
+        return `
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">${categoryLabel}</div>
+                        <div class="card-subtitle">${event ? escapeHtml(event.name) : 'Wydarzenie #' + c.event_id}</div>
+                    </div>
+                    <span class="card-tag">${formatDate(c.created_at)}</span>
+                </div>
+                <div class="card-body">${c.description ? escapeHtml(c.description) : 'Brak opisu'}</div>
+                <div class="card-footer">
+                    <span class="card-amount negative">-${formatMoney(c.amount)}</span>
+                    <div class="card-actions">
+                        <button class="btn btn-small btn-secondary" onclick="editCost(${c.id})">✏️</button>
+                        <button class="btn btn-small btn-danger" onclick="deleteCost(${c.id})">🗑️</button>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function showCostForm(cost = null) {
+    const isEdit = !!cost;
+    const categories = state.categories?.cost_categories || {};
+    const categoryOptions = Object.entries(categories).map(([key, label]) => 
+        `<option value="${key}" ${cost?.category === key ? 'selected' : ''}>${label}</option>`
+    ).join('');
+    
+    const eventOptions = state.events.map(e => 
+        `<option value="${e.id}" ${cost?.event_id === e.id ? 'selected' : ''}>${escapeHtml(e.name)}</option>`
+    ).join('');
+    
+    const html = `
+        <form id="cost-form">
+            <div class="form-group">
+                <label>Wydarzenie *</label>
+                <select name="event_id" required class="form-select">${eventOptions}</select>
+            </div>
             <div class="form-group">
                 <label>Kategoria *</label>
-                <select name="category" required>
-                    <optgroup label="🍺 Bar">
-                        <option value="bar_alcohol">Alkohol</option>
-                        <option value="bar_beverages">Napoje bezalkoholowe</option>
-                        <option value="bar_food">Jedzenie</option>
-                        <option value="bar_supplies">Zaopatrzenie bar</option>
-                    </optgroup>
-                    <optgroup label="🎤 Artyści i event">
-                        <option value="artist_fee">Honorarium artysty</option>
-                        <option value="sound_engineer">Realizator dźwięku</option>
-                        <option value="lighting">Oświetlenie</option>
-                        <option value="equipment_rental">Wynajem sprzętu</option>
-                    </optgroup>
-                    <optgroup label="🏢 Operacyjne">
-                        <option value="staff_wages">Wynagrodzenia</option>
-                        <option value="utilities">Media</option>
-                        <option value="maintenance">Konserwacja</option>
-                        <option value="cleaning">Sprzątanie</option>
-                        <option value="security">Ochrona</option>
-                        <option value="marketing">Marketing</option>
-                    </optgroup>
-                    <optgroup label="📋 Inne">
-                        <option value="licenses">Licencje</option>
-                        <option value="insurance">Ubezpieczenia</option>
-                        <option value="other">Inne</option>
-                    </optgroup>
-                </select>
+                <select name="category" required class="form-select">${categoryOptions}</select>
             </div>
             <div class="form-group">
                 <label>Kwota (PLN) *</label>
-                <input type="number" name="amount" step="0.01" min="0.01" required>
+                <input type="number" name="amount" value="${cost?.amount || ''}" min="0.01" step="0.01" required>
             </div>
             <div class="form-group">
                 <label>Opis</label>
-                <input type="text" name="description">
+                <textarea name="description">${cost?.description || ''}</textarea>
             </div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>Dostawca/Sklep</label>
-                    <input type="text" name="vendor" placeholder="np. Makro, Hurtownia XYZ">
-                </div>
-                <div class="form-group">
-                    <label>Nr faktury/paragonu</label>
-                    <input type="text" name="invoice_number">
-                </div>
-            </div>
-            <div class="form-group">
-                <label>Data kosztu</label>
-                <input type="date" name="cost_date" value="${new Date().toISOString().split('T')[0]}">
-            </div>
-            <input type="hidden" name="event_id" value="${eventId || ''}">
             <div class="form-actions">
-                <button type="button" class="btn" onclick="closeModal()">Anuluj</button>
-                <button type="submit" class="btn btn-primary">Zapisz</button>
+                <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
+                <button type="submit" class="btn btn-primary">${isEdit ? 'Zapisz' : 'Dodaj'}</button>
             </div>
         </form>
     `;
     
-    modal.style.display = 'flex';
+    showModal(isEdit ? 'Edytuj koszt' : 'Nowy koszt', html);
+    
+    $('#cost-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = {
+            event_id: parseInt(formData.get('event_id')),
+            category: formData.get('category'),
+            amount: parseFloat(formData.get('amount')),
+            description: formData.get('description')
+        };
+        
+        try {
+            if (isEdit) {
+                await api(`/api/costs/${cost.id}`, { method: 'PUT', body: JSON.stringify(data) });
+                toast('Koszt zaktualizowany', 'success');
+            } else {
+                await api('/api/costs', { method: 'POST', body: JSON.stringify(data) });
+                toast('Koszt dodany', 'success');
+            }
+            hideModal();
+            await loadCosts($('#cost-event-filter').value || null);
+            updateDashboard();
+        } catch (error) {
+            toast(error.message, 'error');
+        }
+    };
 }
 
-async function saveCost(e) {
-    e.preventDefault();
-    const form = e.target;
-    const formData = new FormData(form);
-    
-    const data = {
-        category: formData.get('category'),
-        amount: parseFloat(formData.get('amount')),
-        description: formData.get('description') || null,
-        vendor: formData.get('vendor') || null,
-        invoice_number: formData.get('invoice_number') || null,
-        cost_date: formData.get('cost_date') ? new Date(formData.get('cost_date')).toISOString() : null
-    };
-    
-    if (formData.get('event_id')) {
-        data.event_id = parseInt(formData.get('event_id'));
-    }
-    
-    try {
-        await api('/api/costs', {
-            method: 'POST',
-            body: JSON.stringify(data)
-        });
-        closeModal();
-        showToast('Koszt dodany!', 'success');
-        showCosts();
-    } catch (error) {
-        showToast(error.message, 'error');
-    }
+function editCost(id) {
+    const cost = state.costs.find(c => c.id === id);
+    if (cost) showCostForm(cost);
 }
 
 async function deleteCost(id) {
@@ -648,696 +795,577 @@ async function deleteCost(id) {
     
     try {
         await api(`/api/costs/${id}`, { method: 'DELETE' });
-        showToast('Koszt usunięty', 'success');
-        showCosts();
+        toast('Koszt usunięty', 'success');
+        await loadCosts($('#cost-event-filter').value || null);
+        updateDashboard();
     } catch (error) {
-        showToast(error.message, 'error');
-    }
-}
-
-// ==================== RECEIPTS ====================
-async function showReceipts() {
-    const content = document.getElementById('mainContent');
-    content.innerHTML = '<div class="loading">Ładowanie paragonów...</div>';
-    
-    try {
-        const data = await api('/api/receipts');
-        state.receipts = data.receipts;
-        
-        content.innerHTML = `
-            <div class="page-header">
-                <h1>📷 Paragony i faktury</h1>
-                <button class="btn btn-primary" onclick="showUploadReceiptModal()">➕ Dodaj paragon</button>
-            </div>
-            
-            <div class="info-box">
-                <strong>💡 Jak to działa:</strong>
-                <ol>
-                    <li>Prześlij zdjęcie paragonu</li>
-                    <li>Wprowadź tekst OCR (lub użyj aplikacji do skanowania)</li>
-                    <li>System automatycznie rozpozna sklep, datę i produkty</li>
-                    <li>Utwórz koszty jednym kliknięciem</li>
-                </ol>
-            </div>
-            
-            <div class="table-container">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Plik</th>
-                            <th>Sklep</th>
-                            <th>Data paragonu</th>
-                            <th>Suma</th>
-                            <th>Status</th>
-                            <th>Przesłano</th>
-                            <th>Akcje</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${data.receipts.length ? data.receipts.map(r => `
-                            <tr>
-                                <td>📄 ${r.filename}</td>
-                                <td>${r.store_name || '-'}</td>
-                                <td>${r.receipt_date ? formatDate(r.receipt_date) : '-'}</td>
-                                <td>${r.total_amount ? formatCurrency(r.total_amount) : '-'}</td>
-                                <td>${getStatusBadge(r.status)}</td>
-                                <td>${formatDate(r.uploaded_at)}</td>
-                                <td class="actions">
-                                    <button class="btn btn-sm" onclick="viewReceipt(${r.id})">👁️</button>
-                                    ${r.status === 'processed' ? `<button class="btn btn-sm btn-success" onclick="createCostsFromReceipt(${r.id})">💰</button>` : ''}
-                                    <button class="btn btn-sm" onclick="processReceiptOCR(${r.id})">🔍</button>
-                                    <button class="btn btn-sm btn-danger" onclick="deleteReceipt(${r.id})">🗑️</button>
-                                </td>
-                            </tr>
-                        `).join('') : '<tr><td colspan="7" class="empty-state">Brak paragonów</td></tr>'}
-                    </tbody>
-                </table>
-            </div>
-        `;
-    } catch (error) {
-        content.innerHTML = `<div class="error">Błąd: ${error.message}</div>`;
-    }
-}
-
-function showUploadReceiptModal() {
-    const modal = document.getElementById('modal');
-    const modalContent = document.getElementById('modalContent');
-    
-    modalContent.innerHTML = `
-        <h2>📷 Dodaj paragon</h2>
-        <form id="receiptForm" onsubmit="uploadReceipt(event)">
-            <div class="form-group">
-                <label>Zdjęcie paragonu *</label>
-                <input type="file" name="file" accept="image/*,.pdf" required onchange="previewImage(this)">
-                <div id="imagePreview" class="image-preview"></div>
-            </div>
-            
-            <div class="form-group">
-                <label>Tekst OCR (opcjonalnie)</label>
-                <textarea name="ocr_text" rows="6" placeholder="Wklej tekst z paragonu lub pozostaw puste..."></textarea>
-                <small>Tip: Użyj Google Lens lub podobnej aplikacji do skanowania tekstu z paragonu</small>
-            </div>
-            
-            <div class="form-actions">
-                <button type="button" class="btn" onclick="closeModal()">Anuluj</button>
-                <button type="submit" class="btn btn-primary">Prześlij</button>
-            </div>
-        </form>
-    `;
-    
-    modal.style.display = 'flex';
-}
-
-function previewImage(input) {
-    const preview = document.getElementById('imagePreview');
-    if (input.files && input.files[0]) {
-        const reader = new FileReader();
-        reader.onload = function(e) {
-            preview.innerHTML = `<img src="${e.target.result}" style="max-width: 100%; max-height: 300px;">`;
-        };
-        reader.readAsDataURL(input.files[0]);
-    }
-}
-
-async function uploadReceipt(e) {
-    e.preventDefault();
-    const form = e.target;
-    const formData = new FormData(form);
-    
-    try {
-        // First upload the file
-        const uploadData = new FormData();
-        uploadData.append('file', formData.get('file'));
-        
-        const result = await apiFormData('/api/receipts/upload', uploadData);
-        
-        // If OCR text provided, process it
-        const ocrText = formData.get('ocr_text');
-        if (ocrText && ocrText.trim()) {
-            const processData = new FormData();
-            processData.append('ocr_text', ocrText);
-            await apiFormData(`/api/receipts/${result.id}/process`, processData);
-        }
-        
-        closeModal();
-        showToast('Paragon przesłany!', 'success');
-        showReceipts();
-    } catch (error) {
-        showToast(error.message, 'error');
-    }
-}
-
-async function viewReceipt(id) {
-    const modal = document.getElementById('modal');
-    const modalContent = document.getElementById('modalContent');
-    
-    try {
-        const receipt = await api(`/api/receipts/${id}`);
-        
-        modalContent.innerHTML = `
-            <h2>📷 Paragon #${receipt.id}</h2>
-            <div class="receipt-detail">
-                <div class="receipt-image">
-                    <img src="${API_URL}/api/receipts/${id}/image" alt="Paragon" style="max-width: 100%; max-height: 400px;">
-                </div>
-                <div class="receipt-info">
-                    <p><strong>Sklep:</strong> ${receipt.store_name || 'Nie rozpoznano'}</p>
-                    <p><strong>Data:</strong> ${receipt.receipt_date ? formatDate(receipt.receipt_date) : 'Nie rozpoznano'}</p>
-                    <p><strong>Suma:</strong> ${receipt.total_amount ? formatCurrency(receipt.total_amount) : 'Nie rozpoznano'}</p>
-                    <p><strong>Status:</strong> ${getStatusBadge(receipt.status)}</p>
-                    <p><strong>Pewność OCR:</strong> ${receipt.ocr_confidence ? receipt.ocr_confidence.toFixed(0) + '%' : '-'}</p>
-                    
-                    ${receipt.ocr_raw_text ? `
-                        <h4>Rozpoznany tekst:</h4>
-                        <pre class="ocr-text">${receipt.ocr_raw_text}</pre>
-                    ` : ''}
-                </div>
-            </div>
-            <div class="form-actions">
-                <button type="button" class="btn" onclick="closeModal()">Zamknij</button>
-                ${receipt.status === 'processed' ? `
-                    <button class="btn btn-success" onclick="createCostsFromReceipt(${id}); closeModal();">💰 Utwórz koszty</button>
-                ` : ''}
-            </div>
-        `;
-        
-        modal.style.display = 'flex';
-    } catch (error) {
-        showToast(error.message, 'error');
-    }
-}
-
-async function processReceiptOCR(id) {
-    const modal = document.getElementById('modal');
-    const modalContent = document.getElementById('modalContent');
-    
-    modalContent.innerHTML = `
-        <h2>🔍 Przetwórz OCR</h2>
-        <p>Wklej tekst z paragonu (użyj Google Lens lub innej aplikacji OCR):</p>
-        <form onsubmit="submitOCR(event, ${id})">
-            <div class="form-group">
-                <textarea name="ocr_text" rows="10" required placeholder="Wklej tekst paragonu tutaj..."></textarea>
-            </div>
-            <div class="form-actions">
-                <button type="button" class="btn" onclick="closeModal()">Anuluj</button>
-                <button type="submit" class="btn btn-primary">Przetwórz</button>
-            </div>
-        </form>
-    `;
-    
-    modal.style.display = 'flex';
-}
-
-async function submitOCR(e, receiptId) {
-    e.preventDefault();
-    const form = e.target;
-    const formData = new FormData(form);
-    
-    try {
-        const processData = new FormData();
-        processData.append('ocr_text', formData.get('ocr_text'));
-        
-        const result = await apiFormData(`/api/receipts/${receiptId}/process`, processData);
-        
-        closeModal();
-        showToast(`Rozpoznano: ${result.store_name || 'sklep'}, suma: ${result.total || 'nieznana'}`, 'success');
-        showReceipts();
-    } catch (error) {
-        showToast(error.message, 'error');
-    }
-}
-
-async function createCostsFromReceipt(id) {
-    if (!confirm('Utworzyć koszty z pozycji paragonu?')) return;
-    
-    try {
-        const result = await api(`/api/receipts/${id}/create-costs`, { method: 'POST' });
-        showToast(result.message, 'success');
-        showCosts();
-    } catch (error) {
-        showToast(error.message, 'error');
-    }
-}
-
-async function deleteReceipt(id) {
-    if (!confirm('Czy na pewno chcesz usunąć ten paragon?')) return;
-    
-    try {
-        await api(`/api/receipts/${id}`, { method: 'DELETE' });
-        showToast('Paragon usunięty', 'success');
-        showReceipts();
-    } catch (error) {
-        showToast(error.message, 'error');
+        toast(error.message, 'error');
     }
 }
 
 // ==================== REVENUE ====================
-async function showRevenue() {
-    const content = document.getElementById('mainContent');
-    content.innerHTML = '<div class="loading">Ładowanie przychodów...</div>';
+
+async function loadRevenue(eventId = null) {
+    if (eventId) {
+        state.revenues = await api(`/api/revenue/event/${eventId}`);
+    } else {
+        state.revenues = [];
+        for (const event of state.events) {
+            const revenues = await api(`/api/revenue/event/${event.id}`);
+            state.revenues.push(...revenues.map(r => ({ ...r, eventName: event.name })));
+        }
+    }
+    renderRevenue();
+}
+
+function renderRevenue() {
+    const list = $('#revenue-list');
     
-    try {
-        const events = await api('/api/events');
-        
-        content.innerHTML = `
-            <div class="page-header">
-                <h1>💰 Przychody</h1>
-                <button class="btn btn-primary" onclick="showAddRevenueModal()">➕ Dodaj przychód</button>
-            </div>
-            
-            <p>Wybierz wydarzenie, aby zobaczyć przychody:</p>
-            
-            <div class="event-cards">
-                ${events.events.map(e => `
-                    <div class="event-card" onclick="showEventRevenue(${e.id})">
-                        <h3>${e.name}</h3>
-                        <p>${formatDate(e.date)}</p>
+    if (!state.revenues.length) {
+        list.innerHTML = '<p class="text-center" style="color: var(--text-muted)">Brak przychodów</p>';
+        return;
+    }
+    
+    list.innerHTML = state.revenues.map(r => {
+        const sourceLabel = state.categories?.revenue_sources?.[r.source] || r.source;
+        const event = state.events.find(e => e.id === r.event_id);
+        return `
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">${sourceLabel}</div>
+                        <div class="card-subtitle">${event ? escapeHtml(event.name) : 'Wydarzenie #' + r.event_id}</div>
                     </div>
-                `).join('')}
+                    <span class="card-tag">${formatDate(r.created_at)}</span>
+                </div>
+                <div class="card-body">${r.description ? escapeHtml(r.description) : 'Brak opisu'}</div>
+                <div class="card-footer">
+                    <span class="card-amount positive">+${formatMoney(r.amount)}</span>
+                    <div class="card-actions">
+                        <button class="btn btn-small btn-secondary" onclick="editRevenue(${r.id})">✏️</button>
+                        <button class="btn btn-small btn-danger" onclick="deleteRevenue(${r.id})">🗑️</button>
+                    </div>
+                </div>
             </div>
         `;
-    } catch (error) {
-        content.innerHTML = `<div class="error">Błąd: ${error.message}</div>`;
-    }
+    }).join('');
 }
 
-async function showEventRevenue(eventId) {
-    try {
-        const revenues = await api(`/api/revenue/event/${eventId}`);
-        const event = state.events.find(e => e.id === eventId) || { name: 'Wydarzenie' };
-        
-        const modal = document.getElementById('modal');
-        const modalContent = document.getElementById('modalContent');
-        
-        const total = revenues.reduce((sum, r) => sum + r.amount, 0);
-        
-        modalContent.innerHTML = `
-            <h2>💰 Przychody: ${event.name}</h2>
-            <p><strong>Suma:</strong> ${formatCurrency(total)}</p>
-            
-            <table class="data-table">
-                <thead>
-                    <tr>
-                        <th>Źródło</th>
-                        <th>Kwota</th>
-                        <th>Opis</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    ${revenues.map(r => `
-                        <tr>
-                            <td>${getRevenueLabel(r.source)}</td>
-                            <td>${formatCurrency(r.amount)}</td>
-                            <td>${r.description || '-'}</td>
-                        </tr>
-                    `).join('')}
-                </tbody>
-            </table>
-            
-            <div class="form-actions">
-                <button class="btn" onclick="closeModal()">Zamknij</button>
-                <button class="btn btn-primary" onclick="closeModal(); showAddRevenueModal(${eventId})">➕ Dodaj</button>
-            </div>
-        `;
-        
-        modal.style.display = 'flex';
-    } catch (error) {
-        showToast(error.message, 'error');
-    }
-}
-
-function showAddRevenueModal(eventId = null) {
-    const modal = document.getElementById('modal');
-    const modalContent = document.getElementById('modalContent');
-    
-    const eventOptions = state.events.map(e => 
-        `<option value="${e.id}" ${e.id === eventId ? 'selected' : ''}>${e.name}</option>`
+function showRevenueForm(revenue = null) {
+    const isEdit = !!revenue;
+    const sources = state.categories?.revenue_sources || {};
+    const sourceOptions = Object.entries(sources).map(([key, label]) => 
+        `<option value="${key}" ${revenue?.source === key ? 'selected' : ''}>${label}</option>`
     ).join('');
     
-    modalContent.innerHTML = `
-        <h2>💰 Dodaj przychód</h2>
-        <form id="revenueForm" onsubmit="saveRevenue(event)">
+    const eventOptions = state.events.map(e => 
+        `<option value="${e.id}" ${revenue?.event_id === e.id ? 'selected' : ''}>${escapeHtml(e.name)}</option>`
+    ).join('');
+    
+    const html = `
+        <form id="revenue-form">
             <div class="form-group">
-                <label>Wydarzenie</label>
-                <select name="event_id">
-                    <option value="">-- Bez wydarzenia --</option>
-                    ${eventOptions}
-                </select>
+                <label>Wydarzenie *</label>
+                <select name="event_id" required class="form-select">${eventOptions}</select>
             </div>
             <div class="form-group">
                 <label>Źródło *</label>
-                <select name="source" required>
-                    <option value="box_office">🎫 Bilety</option>
-                    <option value="bar_sales">🍺 Sprzedaż bar</option>
-                    <option value="merchandise">👕 Merchandise</option>
-                    <option value="sponsorship">🤝 Sponsoring</option>
-                    <option value="rental">🏠 Wynajem</option>
-                    <option value="other">📋 Inne</option>
-                </select>
+                <select name="source" required class="form-select">${sourceOptions}</select>
             </div>
             <div class="form-group">
                 <label>Kwota (PLN) *</label>
-                <input type="number" name="amount" step="0.01" min="0.01" required>
+                <input type="number" name="amount" value="${revenue?.amount || ''}" min="0.01" step="0.01" required>
             </div>
             <div class="form-group">
                 <label>Opis</label>
-                <input type="text" name="description">
+                <textarea name="description">${revenue?.description || ''}</textarea>
             </div>
             <div class="form-actions">
-                <button type="button" class="btn" onclick="closeModal()">Anuluj</button>
+                <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
+                <button type="submit" class="btn btn-primary">${isEdit ? 'Zapisz' : 'Dodaj'}</button>
+            </div>
+        </form>
+    `;
+    
+    showModal(isEdit ? 'Edytuj przychód' : 'Nowy przychód', html);
+    
+    $('#revenue-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = {
+            event_id: parseInt(formData.get('event_id')),
+            source: formData.get('source'),
+            amount: parseFloat(formData.get('amount')),
+            description: formData.get('description')
+        };
+        
+        try {
+            if (isEdit) {
+                await api(`/api/revenue/${revenue.id}`, { method: 'PUT', body: JSON.stringify(data) });
+                toast('Przychód zaktualizowany', 'success');
+            } else {
+                await api('/api/revenue', { method: 'POST', body: JSON.stringify(data) });
+                toast('Przychód dodany', 'success');
+            }
+            hideModal();
+            await loadRevenue($('#revenue-event-filter').value || null);
+            updateDashboard();
+        } catch (error) {
+            toast(error.message, 'error');
+        }
+    };
+}
+
+function editRevenue(id) {
+    const revenue = state.revenues.find(r => r.id === id);
+    if (revenue) showRevenueForm(revenue);
+}
+
+async function deleteRevenue(id) {
+    if (!confirm('Czy na pewno chcesz usunąć ten przychód?')) return;
+    
+    try {
+        await api(`/api/revenue/${id}`, { method: 'DELETE' });
+        toast('Przychód usunięty', 'success');
+        await loadRevenue($('#revenue-event-filter').value || null);
+        updateDashboard();
+    } catch (error) {
+        toast(error.message, 'error');
+    }
+}
+
+// ==================== RECEIPTS ====================
+
+async function loadReceipts() {
+    state.receipts = await api('/api/receipts');
+    renderReceipts();
+}
+
+function renderReceipts() {
+    const list = $('#receipts-list');
+    
+    if (!state.receipts.length) {
+        list.innerHTML = '<p class="text-center" style="color: var(--text-muted)">Brak paragonów</p>';
+        return;
+    }
+    
+    list.innerHTML = state.receipts.map(r => `
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">🧾 ${r.store_name || 'Nieznany sklep'}</div>
+                    <div class="card-subtitle">${r.receipt_date ? formatDate(r.receipt_date) : 'Brak daty'}</div>
+                </div>
+                <span class="card-tag ${r.status === 'processed' ? 'text-success' : ''}">${r.status === 'processed' ? '✓ Przetworzony' : '⏳ Oczekuje'}</span>
+            </div>
+            <div class="card-footer">
+                <span class="card-amount">${r.total_amount ? formatMoney(r.total_amount) : 'Brak kwoty'}</span>
+                ${r.status === 'pending' ? `
+                <div class="card-actions">
+                    <button class="btn btn-small btn-primary" onclick="createCostFromReceipt(${r.id})">💰 Utwórz koszt</button>
+                </div>` : ''}
+            </div>
+        </div>
+    `).join('');
+}
+
+function showReceiptForm() {
+    const html = `
+        <form id="receipt-form">
+            <div class="form-group">
+                <label>Tekst paragonu (OCR) *</label>
+                <textarea name="ocr_text" rows="10" placeholder="Wklej tekst zeskanowany z paragonu (np. Google Lens)..." required></textarea>
+            </div>
+            <p style="color: var(--text-muted); font-size: 12px; margin-bottom: 16px;">
+                💡 Użyj Google Lens lub podobnej aplikacji do zeskanowania paragonu, a następnie wklej tekst powyżej.
+            </p>
+            <div class="form-actions">
+                <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
+                <button type="submit" class="btn btn-primary">📤 Prześlij</button>
+            </div>
+        </form>
+    `;
+    
+    showModal('Dodaj paragon', html);
+    
+    $('#receipt-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        
+        try {
+            const result = await api('/api/receipts/upload', {
+                method: 'POST',
+                body: JSON.stringify({ ocr_text: formData.get('ocr_text') })
+            });
+            
+            toast(`Paragon dodany! Rozpoznano sklep: ${result.store_name || 'Nieznany'}`, 'success');
+            hideModal();
+            await loadReceipts();
+        } catch (error) {
+            toast(error.message, 'error');
+        }
+    };
+}
+
+function createCostFromReceipt(receiptId) {
+    const receipt = state.receipts.find(r => r.id === receiptId);
+    if (!receipt) return;
+    
+    const eventOptions = state.events.map(e => 
+        `<option value="${e.id}">${escapeHtml(e.name)}</option>`
+    ).join('');
+    
+    const categories = state.categories?.cost_categories || {};
+    const categoryOptions = Object.entries(categories).map(([key, label]) => 
+        `<option value="${key}" ${key === 'bar_supplies' ? 'selected' : ''}>${label}</option>`
+    ).join('');
+    
+    const html = `
+        <form id="receipt-cost-form">
+            <p style="margin-bottom: 16px;">
+                <strong>Paragon:</strong> ${receipt.store_name || 'Nieznany sklep'}<br>
+                <strong>Kwota:</strong> ${receipt.total_amount ? formatMoney(receipt.total_amount) : 'Brak'}
+            </p>
+            <div class="form-group">
+                <label>Wydarzenie *</label>
+                <select name="event_id" required class="form-select">${eventOptions}</select>
+            </div>
+            <div class="form-group">
+                <label>Kategoria *</label>
+                <select name="category" required class="form-select">${categoryOptions}</select>
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
+                <button type="submit" class="btn btn-primary">✅ Utwórz koszt</button>
+            </div>
+        </form>
+    `;
+    
+    showModal('Utwórz koszt z paragonu', html);
+    
+    $('#receipt-cost-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        
+        try {
+            await api(`/api/receipts/${receiptId}/create-costs`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    receipt_id: receiptId,
+                    event_id: parseInt(formData.get('event_id')),
+                    category: formData.get('category')
+                })
+            });
+            
+            toast('Koszt utworzony z paragonu!', 'success');
+            hideModal();
+            await loadReceipts();
+            updateDashboard();
+        } catch (error) {
+            toast(error.message, 'error');
+        }
+    };
+}
+
+// ==================== REPORTS ====================
+
+async function loadReport(eventId) {
+    if (!eventId) {
+        $('#report-content').innerHTML = '<p class="text-center" style="color: var(--text-muted)">Wybierz wydarzenie</p>';
+        return;
+    }
+    
+    try {
+        const report = await api(`/api/reports/event/${eventId}`);
+        
+        const costsBreakdown = Object.entries(report.costs_breakdown || {}).map(([cat, amount]) => {
+            const label = state.categories?.cost_categories?.[cat] || cat;
+            return `<div class="breakdown-item"><span>${label}</span><span class="text-danger">-${formatMoney(amount)}</span></div>`;
+        }).join('') || '<p style="color: var(--text-muted)">Brak kosztów</p>';
+        
+        const revenueBreakdown = Object.entries(report.revenue_breakdown || {}).map(([src, amount]) => {
+            const label = state.categories?.revenue_sources?.[src] || src;
+            return `<div class="breakdown-item"><span>${label}</span><span class="text-success">+${formatMoney(amount)}</span></div>`;
+        }).join('') || '<p style="color: var(--text-muted)">Brak przychodów</p>';
+        
+        $('#report-content').innerHTML = `
+            <h3 style="margin-bottom: 20px;">📊 ${escapeHtml(report.event_name)}</h3>
+            <div class="report-summary">
+                <div class="report-stat">
+                    <span class="report-stat-value text-danger">${formatMoney(report.total_costs)}</span>
+                    <span class="report-stat-label">Koszty</span>
+                </div>
+                <div class="report-stat">
+                    <span class="report-stat-value text-success">${formatMoney(report.total_revenue)}</span>
+                    <span class="report-stat-label">Przychody</span>
+                </div>
+                <div class="report-stat">
+                    <span class="report-stat-value ${report.net_profit >= 0 ? 'text-success' : 'text-danger'}">${formatMoney(report.net_profit)}</span>
+                    <span class="report-stat-label">Zysk netto</span>
+                </div>
+                <div class="report-stat">
+                    <span class="report-stat-value">${report.profit_margin.toFixed(1)}%</span>
+                    <span class="report-stat-label">Marża</span>
+                </div>
+            </div>
+            <div class="breakdown-section">
+                <h4>💸 Koszty</h4>
+                ${costsBreakdown}
+            </div>
+            <div class="breakdown-section">
+                <h4>💰 Przychody</h4>
+                ${revenueBreakdown}
+            </div>
+        `;
+    } catch (error) {
+        toast(error.message, 'error');
+    }
+}
+
+// ==================== USERS ====================
+
+function renderUsers() {
+    const list = $('#users-list');
+    
+    if (!state.users.length) {
+        list.innerHTML = '<p class="text-center" style="color: var(--text-muted)">Brak użytkowników</p>';
+        return;
+    }
+    
+    list.innerHTML = state.users.map(u => `
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">👤 ${escapeHtml(u.full_name)}</div>
+                    <div class="card-subtitle">${u.email}</div>
+                </div>
+                <span class="card-tag">${getRoleLabel(u.role)}</span>
+            </div>
+            <div class="card-footer">
+                <span class="${u.is_active ? 'text-success' : 'text-danger'}">${u.is_active ? '✓ Aktywny' : '✗ Nieaktywny'}</span>
+                ${state.user.role === 'owner' && u.id !== state.user.id ? `
+                <div class="card-actions">
+                    <button class="btn btn-small btn-secondary" onclick="editUser(${u.id})">✏️</button>
+                    <button class="btn btn-small btn-danger" onclick="deleteUser(${u.id})">🗑️</button>
+                </div>
+                ` : ''}
+            </div>
+        </div>
+    `).join('');
+}
+
+function editUser(id) {
+    const user = state.users.find(u => u.id === id);
+    if (!user) return;
+    
+    const html = `
+        <form id="user-form">
+            <div class="form-group">
+                <label>Imię i nazwisko</label>
+                <input type="text" name="full_name" value="${escapeHtml(user.full_name)}">
+            </div>
+            <div class="form-group">
+                <label>Rola</label>
+                <select name="role" class="form-select">
+                    <option value="worker" ${user.role === 'worker' ? 'selected' : ''}>Pracownik</option>
+                    <option value="manager" ${user.role === 'manager' ? 'selected' : ''}>Manager</option>
+                    <option value="owner" ${user.role === 'owner' ? 'selected' : ''}>Właściciel</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" name="is_active" ${user.is_active ? 'checked' : ''}>
+                    Aktywny
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
                 <button type="submit" class="btn btn-primary">Zapisz</button>
             </div>
         </form>
     `;
     
-    modal.style.display = 'flex';
-}
-
-async function saveRevenue(e) {
-    e.preventDefault();
-    const form = e.target;
-    const formData = new FormData(form);
+    showModal('Edytuj użytkownika', html);
     
-    const data = {
-        source: formData.get('source'),
-        amount: parseFloat(formData.get('amount')),
-        description: formData.get('description') || null
-    };
-    
-    if (formData.get('event_id')) {
-        data.event_id = parseInt(formData.get('event_id'));
-    }
-    
-    try {
-        await api('/api/revenue', {
-            method: 'POST',
-            body: JSON.stringify(data)
-        });
-        closeModal();
-        showToast('Przychód dodany!', 'success');
-        showRevenue();
-    } catch (error) {
-        showToast(error.message, 'error');
-    }
-}
-
-// ==================== REPORTS ====================
-async function showReports() {
-    const content = document.getElementById('mainContent');
-    
-    content.innerHTML = `
-        <div class="page-header">
-            <h1>📊 Raporty</h1>
-        </div>
-        
-        <div class="report-options">
-            <div class="report-card" onclick="showEventReportSelector()">
-                <h3>🎵 Raport wydarzenia</h3>
-                <p>Podsumowanie finansowe pojedynczego wydarzenia</p>
-            </div>
-            
-            <div class="report-card" onclick="showPeriodReportForm()">
-                <h3>📅 Raport okresowy</h3>
-                <p>Podsumowanie za wybrany okres</p>
-            </div>
-        </div>
-    `;
-}
-
-async function showEventReportSelector() {
-    try {
-        const events = await api('/api/events');
-        
-        const modal = document.getElementById('modal');
-        const modalContent = document.getElementById('modalContent');
-        
-        modalContent.innerHTML = `
-            <h2>📊 Wybierz wydarzenie</h2>
-            <div class="event-list-modal">
-                ${events.events.map(e => `
-                    <div class="event-option" onclick="generateEventReport(${e.id})">
-                        <strong>${e.name}</strong>
-                        <span>${formatDate(e.date)}</span>
-                    </div>
-                `).join('')}
-            </div>
-            <div class="form-actions">
-                <button class="btn" onclick="closeModal()">Anuluj</button>
-            </div>
-        `;
-        
-        modal.style.display = 'flex';
-    } catch (error) {
-        showToast(error.message, 'error');
-    }
-}
-
-async function generateEventReport(eventId) {
-    closeModal();
-    
-    try {
-        const report = await api(`/api/reports/event/${eventId}`);
-        
-        const content = document.getElementById('mainContent');
-        content.innerHTML = `
-            <div class="page-header">
-                <h1>📊 Raport: ${report.event_name}</h1>
-                <button class="btn" onclick="showReports()">← Powrót</button>
-            </div>
-            
-            <div class="report-summary">
-                <div class="report-stat ${report.net_profit >= 0 ? 'positive' : 'negative'}">
-                    <span class="label">Zysk netto</span>
-                    <span class="value">${formatCurrency(report.net_profit)}</span>
-                </div>
-                <div class="report-stat">
-                    <span class="label">Marża</span>
-                    <span class="value">${report.profit_margin.toFixed(1)}%</span>
-                </div>
-            </div>
-            
-            <div class="report-details">
-                <div class="report-section">
-                    <h3>💸 Koszty: ${formatCurrency(report.total_costs)}</h3>
-                    <div class="breakdown">
-                        ${Object.entries(report.costs_breakdown).map(([cat, amount]) => `
-                            <div class="breakdown-item">
-                                <span>${getCategoryLabel(cat)}</span>
-                                <span>${formatCurrency(amount)}</span>
-                            </div>
-                        `).join('')}
-                    </div>
-                </div>
-                
-                <div class="report-section">
-                    <h3>💰 Przychody: ${formatCurrency(report.total_revenue)}</h3>
-                    <div class="breakdown">
-                        ${Object.entries(report.revenue_breakdown).map(([src, amount]) => `
-                            <div class="breakdown-item">
-                                <span>${getRevenueLabel(src)}</span>
-                                <span>${formatCurrency(amount)}</span>
-                            </div>
-                        `).join('')}
-                    </div>
-                </div>
-            </div>
-        `;
-    } catch (error) {
-        showToast(error.message, 'error');
-    }
-}
-
-function showPeriodReportForm() {
-    const modal = document.getElementById('modal');
-    const modalContent = document.getElementById('modalContent');
-    
-    const today = new Date().toISOString().split('T')[0];
-    const monthAgo = new Date(Date.now() - 30*24*60*60*1000).toISOString().split('T')[0];
-    
-    modalContent.innerHTML = `
-        <h2>📅 Raport okresowy</h2>
-        <form onsubmit="generatePeriodReport(event)">
-            <div class="form-row">
-                <div class="form-group">
-                    <label>Od</label>
-                    <input type="date" name="start_date" value="${monthAgo}" required>
-                </div>
-                <div class="form-group">
-                    <label>Do</label>
-                    <input type="date" name="end_date" value="${today}" required>
-                </div>
-            </div>
-            <div class="form-actions">
-                <button type="button" class="btn" onclick="closeModal()">Anuluj</button>
-                <button type="submit" class="btn btn-primary">Generuj</button>
-            </div>
-        </form>
-    `;
-    
-    modal.style.display = 'flex';
-}
-
-async function generatePeriodReport(e) {
-    e.preventDefault();
-    const form = e.target;
-    const formData = new FormData(form);
-    
-    closeModal();
-    
-    try {
-        const report = await api(`/api/reports/period?start_date=${formData.get('start_date')}&end_date=${formData.get('end_date')}`);
-        
-        const content = document.getElementById('mainContent');
-        content.innerHTML = `
-            <div class="page-header">
-                <h1>📅 Raport: ${formatDate(report.period_from)} - ${formatDate(report.period_to)}</h1>
-                <button class="btn" onclick="showReports()">← Powrót</button>
-            </div>
-            
-            <div class="report-summary">
-                <div class="report-stat">
-                    <span class="label">Wydarzenia</span>
-                    <span class="value">${report.events_count}</span>
-                </div>
-                <div class="report-stat ${report.net_profit >= 0 ? 'positive' : 'negative'}">
-                    <span class="label">Zysk netto</span>
-                    <span class="value">${formatCurrency(report.net_profit)}</span>
-                </div>
-                <div class="report-stat">
-                    <span class="label">Marża</span>
-                    <span class="value">${report.profit_margin.toFixed(1)}%</span>
-                </div>
-            </div>
-            
-            <div class="report-totals">
-                <div class="total-item">
-                    <span>💸 Całkowite koszty:</span>
-                    <strong>${formatCurrency(report.total_costs)}</strong>
-                </div>
-                <div class="total-item">
-                    <span>💰 Całkowite przychody:</span>
-                    <strong>${formatCurrency(report.total_revenue)}</strong>
-                </div>
-            </div>
-        `;
-    } catch (error) {
-        showToast(error.message, 'error');
-    }
-}
-
-// ==================== USERS ====================
-async function showUsers() {
-    const content = document.getElementById('mainContent');
-    content.innerHTML = '<div class="loading">Ładowanie użytkowników...</div>';
-    
-    try {
-        const users = await api('/api/users');
-        
-        content.innerHTML = `
-            <div class="page-header">
-                <h1>👥 Użytkownicy</h1>
-            </div>
-            
-            <div class="table-container">
-                <table class="data-table">
-                    <thead>
-                        <tr>
-                            <th>Imię i nazwisko</th>
-                            <th>Email</th>
-                            <th>Rola</th>
-                            <th>Status</th>
-                            <th>Data utworzenia</th>
-                            <th>Akcje</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${users.map(u => `
-                            <tr>
-                                <td><strong>${u.full_name}</strong></td>
-                                <td>${u.email}</td>
-                                <td>${getRoleLabel(u.role)}</td>
-                                <td>${u.is_active ? '<span class="badge badge-success">Aktywny</span>' : '<span class="badge badge-danger">Nieaktywny</span>'}</td>
-                                <td>${formatDate(u.created_at)}</td>
-                                <td class="actions">
-                                    ${state.user.role === 'owner' && u.id !== state.user.id ? `
-                                        <button class="btn btn-sm" onclick="editUser(${u.id})">✏️</button>
-                                        <button class="btn btn-sm btn-danger" onclick="deleteUser(${u.id})">🗑️</button>
-                                    ` : '-'}
-                                </td>
-                            </tr>
-                        `).join('')}
-                    </tbody>
-                </table>
-            </div>
-        `;
-    } catch (error) {
-        content.innerHTML = `<div class="error">Błąd: ${error.message}</div>`;
-    }
-}
-
-// ==================== MODAL ====================
-function closeModal() {
-    document.getElementById('modal').style.display = 'none';
-}
-
-// ==================== INIT ====================
-document.addEventListener('DOMContentLoaded', () => {
-    // Check if logged in
-    if (state.token && state.user) {
-        showApp();
-        loadCategories();
-        showDashboard();
-    } else {
-        showLogin();
-    }
-    
-    // Login form
-    document.getElementById('loginForm')?.addEventListener('submit', async (e) => {
+    $('#user-form').onsubmit = async (e) => {
         e.preventDefault();
-        const form = e.target;
+        const formData = new FormData(e.target);
+        
         try {
-            await login(form.email.value, form.password.value);
+            await api(`/api/users/${user.id}`, {
+                method: 'PUT',
+                body: JSON.stringify({
+                    full_name: formData.get('full_name'),
+                    role: formData.get('role'),
+                    is_active: formData.has('is_active')
+                })
+            });
+            toast('Użytkownik zaktualizowany', 'success');
+            hideModal();
+            await loadUsers();
+            renderUsers();
         } catch (error) {
-            showToast(error.message, 'error');
+            toast(error.message, 'error');
+        }
+    };
+}
+
+async function deleteUser(id) {
+    if (!confirm('Czy na pewno chcesz usunąć tego użytkownika?')) return;
+    
+    try {
+        await api(`/api/users/${id}`, { method: 'DELETE' });
+        toast('Użytkownik usunięty', 'success');
+        await loadUsers();
+        renderUsers();
+    } catch (error) {
+        toast(error.message, 'error');
+    }
+}
+
+// ==================== NAVIGATION ====================
+
+function switchView(viewName) {
+    $$('.view').forEach(v => v.classList.remove('active'));
+    $(`#${viewName}-view`).classList.add('active');
+    
+    $$('.nav-item').forEach(n => n.classList.remove('active'));
+    $(`[data-view="${viewName}"]`).classList.add('active');
+    
+    // Load view data
+    switch (viewName) {
+        case 'events':
+            renderEvents();
+            break;
+        case 'costs':
+            loadCosts();
+            break;
+        case 'revenue':
+            loadRevenue();
+            break;
+        case 'receipts':
+            loadReceipts();
+            break;
+        case 'reports':
+            $('#report-content').innerHTML = '<p class="text-center" style="color: var(--text-muted)">Wybierz wydarzenie</p>';
+            break;
+        case 'users':
+            loadUsers().then(renderUsers);
+            break;
+    }
+    
+    // Close sidebar on mobile
+    $('#sidebar').classList.remove('active');
+}
+
+function toggleChat() {
+    const panel = $('#chat-panel');
+    const isOpening = !panel.classList.contains('active');
+    
+    panel.classList.toggle('active');
+    
+    if (isOpening) {
+        markMessagesRead();
+        loadChatHistory();
+        $('#chat-input').focus();
+    }
+}
+
+// ==================== EVENT LISTENERS ====================
+
+document.addEventListener('DOMContentLoaded', () => {
+    // Login form
+    $('#login-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const email = $('#login-email').value;
+        const password = $('#login-password').value;
+        
+        try {
+            await login(email, password);
+        } catch (error) {
+            $('#login-error').textContent = error.message;
         }
     });
     
-    // Register form
-    document.getElementById('registerForm')?.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const form = e.target;
-        try {
-            await register(form.email.value, form.password.value, form.fullName.value);
-        } catch (error) {
-            showToast(error.message, 'error');
-        }
+    // Logout
+    $('#logout-btn').addEventListener('click', logout);
+    
+    // Menu toggle
+    $('#menu-toggle').addEventListener('click', () => {
+        $('#sidebar').classList.toggle('active');
     });
     
     // Navigation
-    document.querySelectorAll('.nav-item').forEach(item => {
-        item.addEventListener('click', () => {
+    $$('.nav-item').forEach(item => {
+        item.addEventListener('click', (e) => {
+            e.preventDefault();
             const view = item.dataset.view;
-            if (view) showView(view);
+            if (view) switchView(view);
         });
     });
     
-    // Close modal on outside click
-    document.getElementById('modal')?.addEventListener('click', (e) => {
-        if (e.target.id === 'modal') closeModal();
+    // Chat toggle
+    $('#chat-toggle').addEventListener('click', toggleChat);
+    $('#chat-close').addEventListener('click', toggleChat);
+    
+    // Chat form
+    $('#chat-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const input = $('#chat-input');
+        const content = input.value.trim();
+        if (content) {
+            sendChatMessage(content);
+            input.value = '';
+        }
     });
     
-    // Tab switching for login/register
-    document.getElementById('loginTab')?.addEventListener('click', () => {
-        document.getElementById('loginTab').classList.add('active');
-        document.getElementById('registerTab').classList.remove('active');
-        document.getElementById('loginForm').style.display = 'block';
-        document.getElementById('registerForm').style.display = 'none';
+    // Typing indicator
+    let typingThrottle = null;
+    $('#chat-input').addEventListener('input', () => {
+        if (!typingThrottle) {
+            sendTypingIndicator();
+            typingThrottle = setTimeout(() => { typingThrottle = null; }, 2000);
+        }
     });
     
-    document.getElementById('registerTab')?.addEventListener('click', () => {
-        document.getElementById('registerTab').classList.add('active');
-        document.getElementById('loginTab').classList.remove('active');
-        document.getElementById('registerForm').style.display = 'block';
-        document.getElementById('loginForm').style.display = 'none';
+    // Modal close
+    $('.modal-close').addEventListener('click', hideModal);
+    $('#modal').addEventListener('click', (e) => {
+        if (e.target === $('#modal')) hideModal();
     });
+    
+    // Action buttons
+    $('#add-event-btn').addEventListener('click', () => showEventForm());
+    $('#add-cost-btn').addEventListener('click', () => showCostForm());
+    $('#add-revenue-btn').addEventListener('click', () => showRevenueForm());
+    $('#add-receipt-btn').addEventListener('click', () => showReceiptForm());
+    
+    // Filters
+    $('#cost-event-filter').addEventListener('change', (e) => loadCosts(e.target.value || null));
+    $('#revenue-event-filter').addEventListener('change', (e) => loadRevenue(e.target.value || null));
+    $('#report-event-select').addEventListener('change', (e) => loadReport(e.target.value));
+    
+    // Close sidebar when clicking outside on mobile
+    document.addEventListener('click', (e) => {
+        const sidebar = $('#sidebar');
+        const menuBtn = $('#menu-toggle');
+        if (window.innerWidth <= 768 && 
+            sidebar.classList.contains('active') && 
+            !sidebar.contains(e.target) && 
+            !menuBtn.contains(e.target)) {
+            sidebar.classList.remove('active');
+        }
+    });
+    
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            hideModal();
+            $('#chat-panel').classList.remove('active');
+            $('#sidebar').classList.remove('active');
+        }
+    });
+    
+    // Check auth on load
+    checkAuth();
 });
