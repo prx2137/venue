@@ -1,6 +1,9 @@
 """
 Database configuration for Music Venue Management System
 Supports SQLite (development) and PostgreSQL (production)
+
+IMPORTANT: On Render.com, you MUST set DATABASE_URL environment variable
+pointing to PostgreSQL database. SQLite will NOT persist between deploys!
 """
 
 import os
@@ -15,14 +18,29 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./venue.db")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
+# Detect database type for logging
+IS_POSTGRES = DATABASE_URL.startswith("postgresql://")
+IS_SQLITE = DATABASE_URL.startswith("sqlite")
+
+if IS_SQLITE:
+    print("⚠️  WARNING: Using SQLite database - data will NOT persist on Render.com!")
+    print("⚠️  Set DATABASE_URL environment variable to use PostgreSQL!")
+else:
+    print(f"✅ Using PostgreSQL database")
+
 # Create engine with appropriate settings
-if DATABASE_URL.startswith("sqlite"):
+if IS_SQLITE:
     engine = create_engine(
         DATABASE_URL, 
         connect_args={"check_same_thread": False}
     )
 else:
-    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    engine = create_engine(
+        DATABASE_URL, 
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=10
+    )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

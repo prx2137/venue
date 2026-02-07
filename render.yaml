@@ -17,7 +17,7 @@ services:
           name: music-venue-db
           property: connectionString
       - key: OCR_API_KEY
-        sync: false  # You must set this manually in Render dashboard
+        value: "K82925827188957"
     healthCheckPath: /health
 
 databases:

@@ -1022,37 +1022,56 @@ def parse_receipt_ocr(ocr_text: str) -> dict:
 
 
 async def call_ocr_api(image_base64: str, mime_type: str) -> str:
-    """Call OCR.space API to extract text from image"""
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                "https://api.ocr.space/parse/image",
-                data={
-                    "apikey": OCR_API_KEY,
-                    "base64Image": f"data:{mime_type};base64,{image_base64}",
-                    "language": "pol",  # Polish language
-                    "isOverlayRequired": False,
-                    "detectOrientation": True,
-                    "scale": True,
-                    "OCREngine": 2  # Engine 2 is better for receipts
-                }
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("IsErroredOnProcessing"):
-                    error_msg = result.get("ErrorMessage", ["Unknown error"])
-                    print(f"OCR API Error: {error_msg}")
-                    return ""
+    """Call OCR.space API to extract text from image with fallback"""
+    
+    # Try Engine 2 first (better for receipts), fallback to Engine 1
+    for engine in [2, 1]:
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                # Ensure mime_type is correct
+                if not mime_type or mime_type == "application/octet-stream":
+                    mime_type = "image/jpeg"
                 
-                parsed_results = result.get("ParsedResults", [])
-                if parsed_results:
-                    return parsed_results[0].get("ParsedText", "")
-            else:
-                print(f"OCR API HTTP Error: {response.status_code}")
+                response = await client.post(
+                    "https://api.ocr.space/parse/image",
+                    data={
+                        "apikey": OCR_API_KEY,
+                        "base64Image": f"data:{mime_type};base64,{image_base64}",
+                        "language": "pol",
+                        "isOverlayRequired": "false",
+                        "detectOrientation": "true",
+                        "scale": "true",
+                        "OCREngine": str(engine),
+                        "filetype": mime_type.split("/")[-1].upper()  # JPEG, PNG, etc.
+                    }
+                )
                 
-    except Exception as e:
-        print(f"OCR API Exception: {e}")
+                print(f"OCR Engine {engine} response status: {response.status_code}")
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    
+                    if result.get("IsErroredOnProcessing"):
+                        error_msg = result.get("ErrorMessage", ["Unknown error"])
+                        print(f"OCR Engine {engine} Error: {error_msg}")
+                        continue  # Try next engine
+                    
+                    parsed_results = result.get("ParsedResults", [])
+                    if parsed_results:
+                        text = parsed_results[0].get("ParsedText", "").strip()
+                        if text:
+                            print(f"OCR Engine {engine} success: {len(text)} chars")
+                            return text
+                        else:
+                            print(f"OCR Engine {engine}: empty result")
+                            continue
+                else:
+                    print(f"OCR Engine {engine} HTTP Error: {response.status_code}")
+                    continue
+                    
+        except Exception as e:
+            print(f"OCR Engine {engine} Exception: {e}")
+            continue
     
     return ""
 
@@ -1074,10 +1093,13 @@ async def upload_receipt(
     image_base64 = base64.b64encode(content).decode()
     
     # Call real OCR.space API
+    print(f"Calling OCR API for file: {file.filename}, content_type: {file.content_type}, size: {len(content)} bytes")
     ocr_text = await call_ocr_api(image_base64, file.content_type)
     
     if not ocr_text:
-        raise HTTPException(status_code=500, detail="Nie udało się odczytać tekstu z paragonu. Spróbuj z lepszym zdjęciem.")
+        # Still save the receipt even without OCR, user can edit manually
+        print("OCR returned empty, saving receipt anyway for manual processing")
+        ocr_text = "(Nie udało się automatycznie odczytać tekstu - możesz edytować ręcznie)"
     
     parsed = parse_receipt_ocr(ocr_text)
     
