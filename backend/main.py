@@ -165,7 +165,7 @@ async def startup_event():
                 description="Wieczór jazzowy z udziałem legendarnego tria Marcina Wasilewskiego",
                 event_date=datetime(2026, 2, 14, 20, 0),
                 end_date=datetime(2026, 2, 15, 1, 0),
-                venue="Sala Główna",
+                venue="BOWL",
                 expected_attendees=150,
                 ticket_price=89.0,
                 status="upcoming",
@@ -180,10 +180,10 @@ async def startup_event():
             
             # Lineup for Event 1
             lineup1 = [
-                LineupEntry(event_id=event1.id, artist_name="DJ Warm-up Set", stage="Scena główna", 
+                LineupEntry(event_id=event1.id, artist_name="DJ Warm-up Set", stage="BOWL", 
                            start_time=datetime(2026, 2, 14, 20, 0), end_time=datetime(2026, 2, 14, 21, 0),
                            description="Muzyka w tle", is_headliner=False, order_index=1),
-                LineupEntry(event_id=event1.id, artist_name="Marcin Wasilewski Trio", stage="Scena główna",
+                LineupEntry(event_id=event1.id, artist_name="Marcin Wasilewski Trio", stage="BOWL",
                            start_time=datetime(2026, 2, 14, 21, 0), end_time=datetime(2026, 2, 14, 23, 30),
                            description="Główny koncert wieczoru", is_headliner=True, order_index=2),
             ]
@@ -206,7 +206,7 @@ async def startup_event():
                 description="Wieczór z coverami rockowych klasyków",
                 event_date=datetime(2026, 2, 21, 21, 0),
                 end_date=datetime(2026, 2, 22, 3, 0),
-                venue="Sala Główna",
+                venue="BOWL",
                 expected_attendees=200,
                 ticket_price=45.0,
                 status="upcoming",
@@ -220,13 +220,13 @@ async def startup_event():
             
             # Lineup for Event 2
             lineup2 = [
-                LineupEntry(event_id=event2.id, artist_name="Local Heroes", stage="Scena główna",
+                LineupEntry(event_id=event2.id, artist_name="Local Heroes", stage="BOWL",
                            start_time=datetime(2026, 2, 21, 21, 0), end_time=datetime(2026, 2, 21, 22, 30),
                            description="Support - lokalna kapela", is_headliner=False, order_index=1),
-                LineupEntry(event_id=event2.id, artist_name="Rock Legends Tribute", stage="Scena główna",
+                LineupEntry(event_id=event2.id, artist_name="Rock Legends Tribute", stage="BOWL",
                            start_time=datetime(2026, 2, 21, 23, 0), end_time=datetime(2026, 2, 22, 1, 0),
                            description="Główny występ - tribute band", is_headliner=True, order_index=2),
-                LineupEntry(event_id=event2.id, artist_name="DJ Afterparty", stage="Scena główna",
+                LineupEntry(event_id=event2.id, artist_name="DJ Afterparty", stage="BOWL",
                            start_time=datetime(2026, 2, 22, 1, 0), end_time=datetime(2026, 2, 22, 3, 0),
                            description="Afterparty do zamknięcia", is_headliner=False, order_index=3),
             ]
@@ -247,7 +247,7 @@ async def startup_event():
                 description="Nocna impreza z najlepszymi DJ-ami elektronicznej sceny",
                 event_date=datetime(2026, 2, 28, 22, 0),
                 end_date=datetime(2026, 3, 1, 6, 0),
-                venue="Sala Główna",
+                venue="BOWL",
                 expected_attendees=250,
                 ticket_price=55.0,
                 status="upcoming",
@@ -261,13 +261,13 @@ async def startup_event():
             db.flush()
             
             lineup3 = [
-                LineupEntry(event_id=event3.id, artist_name="DJ Warm-up", stage="Scena główna",
+                LineupEntry(event_id=event3.id, artist_name="DJ Warm-up", stage="BOWL",
                            start_time=datetime(2026, 2, 28, 22, 0), end_time=datetime(2026, 3, 1, 0, 0),
                            description="Opening set", is_headliner=False, order_index=1),
-                LineupEntry(event_id=event3.id, artist_name="Headliner DJ", stage="Scena główna",
+                LineupEntry(event_id=event3.id, artist_name="Headliner DJ", stage="BOWL",
                            start_time=datetime(2026, 3, 1, 0, 0), end_time=datetime(2026, 3, 1, 3, 0),
                            description="Main set - techno/house", is_headliner=True, order_index=2),
-                LineupEntry(event_id=event3.id, artist_name="Resident DJ", stage="Scena główna",
+                LineupEntry(event_id=event3.id, artist_name="Resident DJ", stage="BOWL",
                            start_time=datetime(2026, 3, 1, 3, 0), end_time=datetime(2026, 3, 1, 6, 0),
                            description="Closing set", is_headliner=False, order_index=3),
             ]
@@ -823,6 +823,22 @@ def get_cost_categories():
     return categories
 
 
+# Alias for frontend compatibility
+@app.get("/api/stats/categories")
+def get_stats_categories():
+    return get_cost_categories()
+
+
+@app.get("/api/costs/event/{event_id}", response_model=List[CostResponse])
+def list_costs_by_event(event_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get all costs for a specific event"""
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event nie znaleziony")
+    costs = db.query(Cost).filter(Cost.event_id == event_id).order_by(Cost.created_at.desc()).all()
+    return [CostResponse.model_validate(c) for c in costs]
+
+
 # ==================== REVENUE ====================
 
 @app.post("/api/revenue", response_model=RevenueResponse)
@@ -862,6 +878,16 @@ def delete_revenue(revenue_id: int, current_user: User = Depends(require_role(["
     db.delete(revenue)
     db.commit()
     return {"message": "Przychód usunięty"}
+
+
+@app.get("/api/revenue/event/{event_id}", response_model=List[RevenueResponse])
+def list_revenue_by_event(event_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get all revenues for a specific event"""
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event nie znaleziony")
+    revenues = db.query(Revenue).filter(Revenue.event_id == event_id).order_by(Revenue.created_at.desc()).all()
+    return [RevenueResponse.model_validate(r) for r in revenues]
 
 
 # ==================== RECEIPTS (OCR) ====================

@@ -950,10 +950,9 @@ function showEventForm(event = null) {
                 <div class="form-group">
                     <label>Miejsce / Sala</label>
                     <select name="venue">
-                        <option value="Sala Główna" ${event?.venue === 'Sala Główna' ? 'selected' : ''}>Sala Główna</option>
-                        <option value="Sala Kameralna" ${event?.venue === 'Sala Kameralna' ? 'selected' : ''}>Sala Kameralna</option>
-                        <option value="Taras" ${event?.venue === 'Taras' ? 'selected' : ''}>Taras</option>
-                        <option value="Cały klub" ${event?.venue === 'Cały klub' ? 'selected' : ''}>Cały klub</option>
+                        <option value="BOWL" ${event?.venue === 'BOWL' ? 'selected' : ''}>BOWL</option>
+                        <option value="OSTRO" ${event?.venue === 'OSTRO' ? 'selected' : ''}>OSTRO</option>
+                        <option value="BOWL + OSTRO" ${event?.venue === 'BOWL + OSTRO' ? 'selected' : ''}>BOWL + OSTRO (całość)</option>
                     </select>
                 </div>
                 <div class="form-group">
@@ -996,11 +995,11 @@ function showEventForm(event = null) {
                 
                 <div class="form-row">
                     <div class="form-group">
-                        <label>Sprzęt - Scena 1</label>
+                        <label>Sprzęt - BOWL</label>
                         <textarea name="rider_stage1" class="form-textarea" rows="3" placeholder="np. Piano, DI Box...">${event?.rider_stage1 || ''}</textarea>
                     </div>
                     <div class="form-group">
-                        <label>Sprzęt - Scena 2</label>
+                        <label>Sprzęt - OSTRO</label>
                         <textarea name="rider_stage2" class="form-textarea" rows="3" placeholder="np. Keyboard...">${event?.rider_stage2 || ''}</textarea>
                     </div>
                 </div>
@@ -2547,7 +2546,7 @@ function renderEventRider(event) {
     // Stage 1
     html += `
         <div class="rider-box">
-            <h5>🎸 Scena 1 - Sprzęt</h5>
+            <h5>🎸 BOWL - Sprzęt</h5>
             <pre>${event.rider_stage1 || 'Brak informacji'}</pre>
         </div>
     `;
@@ -2555,7 +2554,7 @@ function renderEventRider(event) {
     // Stage 2
     html += `
         <div class="rider-box">
-            <h5>🎹 Scena 2 - Sprzęt</h5>
+            <h5>🎹 OSTRO - Sprzęt</h5>
             <pre>${event.rider_stage2 || 'Brak informacji'}</pre>
         </div>
     `;
@@ -2653,10 +2652,8 @@ async function addLineupEntry(eventId) {
                 <div class="form-group">
                     <label>Scena</label>
                     <select name="stage">
-                        <option value="Scena główna">Scena główna</option>
-                        <option value="Scena 2">Scena 2</option>
-                        <option value="Strefa chill">Strefa chill</option>
-                        <option value="Taras">Taras</option>
+                        <option value="BOWL">BOWL</option>
+                        <option value="OSTRO">OSTRO</option>
                     </select>
                 </div>
                 <div class="form-group">
@@ -2725,10 +2722,8 @@ async function editLineupEntry(eventId, entryId) {
                     <div class="form-group">
                         <label>Scena</label>
                         <select name="stage">
-                            <option value="Scena główna" ${entry.stage === 'Scena główna' ? 'selected' : ''}>Scena główna</option>
-                            <option value="Scena 2" ${entry.stage === 'Scena 2' ? 'selected' : ''}>Scena 2</option>
-                            <option value="Strefa chill" ${entry.stage === 'Strefa chill' ? 'selected' : ''}>Strefa chill</option>
-                            <option value="Taras" ${entry.stage === 'Taras' ? 'selected' : ''}>Taras</option>
+                            <option value="BOWL" ${entry.stage === 'BOWL' ? 'selected' : ''}>BOWL</option>
+                            <option value="OSTRO" ${entry.stage === 'OSTRO' ? 'selected' : ''}>OSTRO</option>
                         </select>
                     </div>
                     <div class="form-group">
@@ -2846,12 +2841,12 @@ async function editEventRider(eventId) {
                 <div class="form-section-title">🎸 Rider techniczny - edycja</div>
                 
                 <div class="form-group">
-                    <label>Sprzęt - Scena 1</label>
+                    <label>Sprzęt - BOWL</label>
                     <textarea name="rider_stage1" class="form-textarea" rows="4" placeholder="np. Piano Steinway, DI Box x2...">${event.rider_stage1 || ''}</textarea>
                 </div>
                 
                 <div class="form-group">
-                    <label>Sprzęt - Scena 2</label>
+                    <label>Sprzęt - OSTRO</label>
                     <textarea name="rider_stage2" class="form-textarea" rows="4" placeholder="np. Keyboard, statyw...">${event.rider_stage2 || ''}</textarea>
                 </div>
                 
