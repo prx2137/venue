@@ -1,102 +1,80 @@
 /**
  * Music Venue Management System - Frontend Application
- * Version 4.0 - Dark Theme, Private Chat, Notifications
+ * Version 3.0 with Live Chat Support
  */
 
-// ============== CONFIGURATION ==============
-const API_URL = window.location.origin;
-const WS_URL = API_URL.replace('http', 'ws');
+// ==================== CONFIGURATION ====================
 
-// Job positions
-const JOB_POSITIONS = [
-    'Barman',
-    'Barback',
-    'Świetlik',
-    'Ochrona',
-    'Akustyk',
-    'Promotor',
-    'Menedżer',
-    'Szatnia',
-    'Bramka'
-];
+const API_URL = typeof window.APP_CONFIG !== 'undefined' 
+    ? window.APP_CONFIG.API_URL 
+    : (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+        ? 'http://localhost:8000'
+        : window.location.origin;
 
-// ============== STATE ==============
-let currentUser = null;
-let authToken = null;
-let currentView = 'dashboard';
-let websocket = null;
-let onlineUsers = [];
-let typingUsers = {};
-let unreadMessages = {};
-let currentChatRecipient = null; // null = public chat
-let notificationsEnabled = true;
+// WebSocket URL
+const WS_URL = API_URL.replace('http://', 'ws://').replace('https://', 'wss://');
 
-// ============== NOTIFICATION SYSTEM ==============
-const notificationSound = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2teleR4JVqvk6Z9VFwBA0f/tmUgUA0bR/vCLPAUNas/+9HguCA5+0v7weR8HAIjV/PJ2FgUOltj98GkNAQif3Pv2XgIFE6jg+flSAQMZseP5+EUAAhu35/r4OwAEIb7q+fkwAAUmxO358iUBBirL8fjqGwIHL9P1+OAPAwgz2vb34AcECDff+PfYAAUKOub5+NEABQ094/r61gAFDkDn+/rUAAQPQ+v8+9MABA9F7v389QIEEEjx/f36AQQRSPX+/f8BBRNLkfAA');
+// ==================== STATE ====================
 
-function playNotificationSound() {
-    if (!notificationsEnabled) return;
-    try {
-        notificationSound.currentTime = 0;
-        notificationSound.volume = 0.5;
-        notificationSound.play().catch(() => {});
-    } catch (e) {}
-}
+let state = {
+    user: null,
+    token: null,
+    events: [],
+    costs: [],
+    revenues: [],
+    receipts: [],
+    users: [],
+    categories: null,
+    chatMessages: [],
+    chatUsers: [],
+    unreadCount: 0,
+    ws: null,
+    wsReconnectAttempts: 0
+};
 
-function vibrate() {
-    if (!notificationsEnabled) return;
-    if ('vibrate' in navigator) {
-        navigator.vibrate([100, 50, 100]);
-    }
-}
+// ==================== DOM ELEMENTS ====================
 
-function notify(title, message) {
-    if (!notificationsEnabled) return;
-    
-    playNotificationSound();
-    vibrate();
-    
-    // Browser notification if permitted
-    if ('Notification' in window && Notification.permission === 'granted') {
-        new Notification(title, { body: message, icon: '🎵' });
-    }
-}
+const $ = (selector) => document.querySelector(selector);
+const $$ = (selector) => document.querySelectorAll(selector);
 
-// Request notification permission
-if ('Notification' in window && Notification.permission === 'default') {
-    Notification.requestPermission();
-}
+// ==================== API HELPERS ====================
 
-// ============== API HELPERS ==============
 async function api(endpoint, options = {}) {
     const headers = {
         'Content-Type': 'application/json',
         ...options.headers
     };
     
-    if (authToken) {
-        headers['Authorization'] = `Bearer ${authToken}`;
+    if (state.token) {
+        headers['Authorization'] = `Bearer ${state.token}`;
     }
     
-    const response = await fetch(`${API_URL}${endpoint}`, {
-        ...options,
-        headers
-    });
-    
-    if (response.status === 401) {
-        logout();
-        throw new Error('Sesja wygasła');
+    try {
+        const response = await fetch(`${API_URL}${endpoint}`, {
+            ...options,
+            headers
+        });
+        
+        if (response.status === 401) {
+            logout();
+            throw new Error('Sesja wygasła');
+        }
+        
+        const data = await response.json();
+        
+        if (!response.ok) {
+            throw new Error(data.detail || 'Błąd serwera');
+        }
+        
+        return data;
+    } catch (error) {
+        console.error('API Error:', error);
+        throw error;
     }
-    
-    if (!response.ok) {
-        const error = await response.json().catch(() => ({ detail: 'Błąd serwera' }));
-        throw new Error(error.detail || 'Błąd serwera');
-    }
-    
-    return response.json();
 }
 
-// ============== AUTHENTICATION ==============
+// ==================== AUTH ====================
+
 async function login(email, password) {
     try {
         const data = await api('/api/auth/login', {
@@ -104,1977 +82,365 @@ async function login(email, password) {
             body: JSON.stringify({ email, password })
         });
         
-        authToken = data.access_token;
-        currentUser = data.user;
-        localStorage.setItem('authToken', authToken);
-        localStorage.setItem('currentUser', JSON.stringify(currentUser));
+        state.token = data.access_token;
+        state.user = data.user;
+        
+        localStorage.setItem('token', state.token);
+        localStorage.setItem('user', JSON.stringify(state.user));
         
         showApp();
         connectWebSocket();
+        toast('Zalogowano pomyślnie!', 'success');
     } catch (error) {
-        showToast('Błąd', error.message, 'error');
+        throw error;
     }
 }
 
 function logout() {
-    authToken = null;
-    currentUser = null;
-    localStorage.removeItem('authToken');
-    localStorage.removeItem('currentUser');
-    if (websocket) {
-        websocket.close();
-        websocket = null;
-    }
+    state.token = null;
+    state.user = null;
+    state.ws?.close();
+    state.ws = null;
+    
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    
     showLogin();
 }
 
 async function checkAuth() {
-    // First check for URL parameters (auto-login)
+    // Check for URL parameters (auto-login)
     const urlParams = new URLSearchParams(window.location.search);
     const emailParam = urlParams.get('email');
     const passwordParam = urlParams.get('password');
     
     if (emailParam && passwordParam) {
-        // Clear URL parameters for security
-        const cleanUrl = window.location.origin + window.location.pathname;
-        window.history.replaceState({}, document.title, cleanUrl);
-        
-        // Attempt login with URL parameters
         try {
+            // Clean URL for security
+            window.history.replaceState({}, document.title, window.location.pathname);
             await login(emailParam, passwordParam);
-            return; // Login successful, exit
+            return;
         } catch (error) {
-            console.error('URL login failed:', error);
-            // Continue to normal flow
+            console.error('Auto-login failed:', error);
+            showLogin();
+            return;
         }
     }
     
-    // Normal auth check from localStorage
-    const token = localStorage.getItem('authToken');
-    const user = localStorage.getItem('currentUser');
+    const token = localStorage.getItem('token');
+    const user = localStorage.getItem('user');
     
     if (token && user) {
-        authToken = token;
-        currentUser = JSON.parse(user);
+        state.token = token;
+        state.user = JSON.parse(user);
         showApp();
         connectWebSocket();
     } else {
         showLogin();
     }
-    
-    // Load notification preference
-    notificationsEnabled = localStorage.getItem('notificationsEnabled') !== 'false';
 }
 
-// ============== WEBSOCKET ==============
+// ==================== WEBSOCKET CHAT ====================
+
 function connectWebSocket() {
-    if (!authToken) return;
+    if (!state.token) return;
     
-    const wsUrl = `${WS_URL}/ws/chat/${authToken}`;
-    websocket = new WebSocket(wsUrl);
+    const wsUrl = `${WS_URL}/ws/chat/${state.token}`;
     
-    websocket.onopen = () => {
-        console.log('WebSocket connected');
-    };
-    
-    websocket.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        handleWebSocketMessage(data);
-    };
-    
-    websocket.onclose = () => {
-        console.log('WebSocket disconnected');
-        setTimeout(() => {
-            if (authToken) connectWebSocket();
-        }, 3000);
-    };
-    
-    websocket.onerror = (error) => {
-        console.error('WebSocket error:', error);
-    };
+    try {
+        state.ws = new WebSocket(wsUrl);
+        
+        state.ws.onopen = () => {
+            console.log('✅ WebSocket connected');
+            state.wsReconnectAttempts = 0;
+            loadChatHistory();
+        };
+        
+        state.ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            handleWebSocketMessage(data);
+        };
+        
+        state.ws.onclose = (event) => {
+            console.log('WebSocket closed:', event.code);
+            // Reconnect with exponential backoff
+            if (state.token && state.wsReconnectAttempts < 5) {
+                const delay = Math.min(1000 * Math.pow(2, state.wsReconnectAttempts), 30000);
+                state.wsReconnectAttempts++;
+                setTimeout(connectWebSocket, delay);
+            }
+        };
+        
+        state.ws.onerror = (error) => {
+            console.error('WebSocket error:', error);
+        };
+    } catch (error) {
+        console.error('WebSocket connection failed:', error);
+        // Fallback to REST polling
+        startChatPolling();
+    }
 }
 
 function handleWebSocketMessage(data) {
     switch (data.type) {
-        case 'message':
-            handleNewMessage(data);
+        case 'new_message':
+            addChatMessage(data.data);
+            if (data.data.sender_id !== state.user.id && !$('#chat-panel').classList.contains('active')) {
+                state.unreadCount++;
+                updateChatBadge();
+                toast(`${data.data.sender_name}: ${data.data.content.substring(0, 50)}...`, 'info');
+            }
             break;
-        case 'online_users':
-            onlineUsers = data.users;
-            updateOnlineStatus();
-            break;
-        case 'typing':
-            handleTyping(data);
-            break;
-        case 'stop_typing':
-            handleStopTyping(data);
-            break;
-    }
-}
-
-function handleNewMessage(data) {
-    // Check if message is for current chat
-    const isForCurrentChat = data.is_private
-        ? (data.sender_id === currentChatRecipient || data.recipient_id === currentChatRecipient || data.sender_id === currentUser.id)
-        : currentChatRecipient === null;
-    
-    if (currentView === 'chat' && isForCurrentChat) {
-        appendMessage(data);
-    }
-    
-    // Notification if not own message and not in current chat
-    if (data.sender_id !== currentUser.id) {
-        if (currentView !== 'chat' || !isForCurrentChat) {
-            // Increment unread count
-            const key = data.is_private ? data.sender_id : 'public';
-            unreadMessages[key] = (unreadMessages[key] || 0) + 1;
-            updateUnreadBadges();
             
-            // Notify
-            const prefix = data.is_private ? '🔒 Prywatna: ' : '';
-            notify(`${prefix}${data.sender_name}`, data.content);
-            showToast('Nowa wiadomość', `${data.sender_name}: ${data.content.substring(0, 50)}...`, 'info');
-        }
-    }
-}
-
-function handleTyping(data) {
-    if (data.user_id !== currentUser.id) {
-        typingUsers[data.user_id] = data.user_name;
-        updateTypingIndicator();
-    }
-}
-
-function handleStopTyping(data) {
-    delete typingUsers[data.user_id];
-    updateTypingIndicator();
-}
-
-// ============== UI RENDERING ==============
-function showLogin() {
-    document.getElementById('app').innerHTML = `
-        <div class="login-container">
-            <div class="login-box">
-                <h1>Venue Manager</h1>
-                <form id="loginForm">
-                    <div class="form-group">
-                        <label>Email</label>
-                        <input type="email" id="loginEmail" placeholder="email@example.com" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Hasło</label>
-                        <input type="password" id="loginPassword" placeholder="••••••••" required>
-                    </div>
-                    <button type="submit" class="btn btn-primary btn-block">Zaloguj się</button>
-                </form>
-            </div>
-        </div>
-    `;
-    
-    document.getElementById('loginForm').addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const email = document.getElementById('loginEmail').value;
-        const password = document.getElementById('loginPassword').value;
-        await login(email, password);
-    });
-}
-
-function showApp() {
-    const roleClass = `role-${currentUser.role}`;
-    const initials = currentUser.full_name.split(' ').map(n => n[0]).join('').toUpperCase();
-    const canAccessFinance = ['owner', 'manager'].includes(currentUser.role);
-    
-    document.getElementById('app').innerHTML = `
-        <div class="app-container">
-            <button class="mobile-menu-toggle" onclick="toggleSidebar()">☰</button>
-            
-            <aside class="sidebar" id="sidebar">
-                <div class="sidebar-header">
-                    <h2>🎵 Venue</h2>
-                </div>
-                
-                <nav class="sidebar-nav">
-                    <a class="nav-item active" data-view="dashboard" onclick="navigateTo('dashboard')">
-                        <span class="icon">📊</span>
-                        <span>Dashboard</span>
-                    </a>
-                    <a class="nav-item" data-view="events" onclick="navigateTo('events')">
-                        <span class="icon">🎤</span>
-                        <span>Wydarzenia</span>
-                    </a>
-                    <a class="nav-item" data-view="calendar" onclick="navigateTo('calendar')">
-                        <span class="icon">📅</span>
-                        <span>Kalendarz</span>
-                    </a>
-                    ${canAccessFinance ? `
-                    <a class="nav-item" data-view="revenues" onclick="navigateTo('revenues')">
-                        <span class="icon">💰</span>
-                        <span>Przychody</span>
-                    </a>
-                    <a class="nav-item" data-view="costs" onclick="navigateTo('costs')">
-                        <span class="icon">📉</span>
-                        <span>Koszty</span>
-                    </a>
-                    <a class="nav-item" data-view="receipts" onclick="navigateTo('receipts')">
-                        <span class="icon">🧾</span>
-                        <span>Paragony</span>
-                    </a>
-                    ` : ''}
-                    <a class="nav-item" data-view="staff" onclick="navigateTo('staff')">
-                        <span class="icon">👥</span>
-                        <span>Personel</span>
-                    </a>
-                    <a class="nav-item" data-view="chat" onclick="navigateTo('chat')">
-                        <span class="icon">💬</span>
-                        <span>Czat</span>
-                        <span class="nav-badge" id="chatBadge" style="display: none">0</span>
-                    </a>
-                    ${canAccessFinance ? `
-                    <a class="nav-item" data-view="users" onclick="navigateTo('users')">
-                        <span class="icon">⚙️</span>
-                        <span>Użytkownicy</span>
-                    </a>
-                    ` : ''}
-                </nav>
-                
-                <div class="sidebar-footer">
-                    <div class="user-info ${roleClass}">
-                        <div class="user-avatar">${initials}</div>
-                        <div class="user-details">
-                            <div class="user-name">${currentUser.full_name}</div>
-                            <div class="user-role">${translateRole(currentUser.role)}</div>
-                        </div>
-                    </div>
-                    <button class="btn btn-secondary btn-block" onclick="logout()">
-                        Wyloguj
-                    </button>
-                </div>
-            </aside>
-            
-            <main class="main-content" id="mainContent">
-                <!-- Content will be rendered here -->
-            </main>
-        </div>
-        
-        <div class="toast-container" id="toastContainer"></div>
-    `;
-    
-    navigateTo('dashboard');
-}
-
-function toggleSidebar() {
-    document.getElementById('sidebar').classList.toggle('open');
-}
-
-function navigateTo(view) {
-    currentView = view;
-    
-    // Update nav
-    document.querySelectorAll('.nav-item').forEach(item => {
-        item.classList.toggle('active', item.dataset.view === view);
-    });
-    
-    // Close mobile menu
-    document.getElementById('sidebar')?.classList.remove('open');
-    
-    // Clear unread for chat
-    if (view === 'chat') {
-        const key = currentChatRecipient || 'public';
-        unreadMessages[key] = 0;
-        updateUnreadBadges();
-    }
-    
-    // Render view
-    const content = document.getElementById('mainContent');
-    switch (view) {
-        case 'dashboard':
-            renderDashboard();
+        case 'user_online':
+            updateUserStatus(data.data.user_id, true, data.data.full_name);
             break;
-        case 'events':
-            renderEvents();
-            break;
-        case 'calendar':
-            renderCalendar();
-            break;
-        case 'revenues':
-            renderRevenues();
-            break;
-        case 'costs':
-            renderCosts();
-            break;
-        case 'receipts':
-            renderReceipts();
-            break;
-        case 'staff':
-            renderStaff();
-            break;
-        case 'chat':
-            renderChat();
-            break;
-        case 'users':
-            renderUsers();
-            break;
-        default:
-            content.innerHTML = '<p>Widok nie znaleziony</p>';
-    }
-}
-
-// ============== DASHBOARD ==============
-let dashboardYear = new Date().getFullYear();
-let dashboardMonth = 0; // 0 = all
-
-async function renderDashboard() {
-    const canAccessFinance = ['owner', 'manager'].includes(currentUser.role);
-    const content = document.getElementById('mainContent');
-    
-    content.innerHTML = `
-        <div class="page-header">
-            <h1>📊 Dashboard</h1>
-        </div>
-        
-        <div class="filters-bar">
-            <div class="filter-group">
-                <label>Rok:</label>
-                <select id="filterYear" onchange="updateDashboardFilters()">
-                    <option value="0">Wszystkie</option>
-                    ${[2024, 2025, 2026, 2027].map(y => 
-                        `<option value="${y}" ${y === dashboardYear ? 'selected' : ''}>${y}</option>`
-                    ).join('')}
-                </select>
-            </div>
-            <div class="filter-group">
-                <label>Miesiąc:</label>
-                <select id="filterMonth" onchange="updateDashboardFilters()">
-                    <option value="0">Wszystkie</option>
-                    ${['Styczeń', 'Luty', 'Marzec', 'Kwiecień', 'Maj', 'Czerwiec', 
-                       'Lipiec', 'Sierpień', 'Wrzesień', 'Październik', 'Listopad', 'Grudzień']
-                        .map((m, i) => `<option value="${i + 1}" ${i + 1 === dashboardMonth ? 'selected' : ''}>${m}</option>`)
-                        .join('')}
-                </select>
-            </div>
-        </div>
-        
-        <div class="stats-grid" id="statsGrid">
-            <div class="loading"><div class="spinner"></div></div>
-        </div>
-        
-        <div class="card">
-            <div class="card-header">
-                <h3>📅 Nadchodzące wydarzenia</h3>
-            </div>
-            <div class="card-body" id="upcomingEvents">
-                <div class="loading"><div class="spinner"></div></div>
-            </div>
-        </div>
-    `;
-    
-    await loadDashboardData();
-}
-
-async function updateDashboardFilters() {
-    dashboardYear = parseInt(document.getElementById('filterYear').value);
-    dashboardMonth = parseInt(document.getElementById('filterMonth').value);
-    await loadDashboardData();
-}
-
-async function loadDashboardData() {
-    try {
-        let url = '/api/dashboard';
-        const params = [];
-        if (dashboardYear) params.push(`year=${dashboardYear}`);
-        if (dashboardMonth) params.push(`month=${dashboardMonth}`);
-        if (params.length) url += '?' + params.join('&');
-        
-        const stats = await api(url);
-        const canAccessFinance = stats.has_financial_access;
-        
-        document.getElementById('statsGrid').innerHTML = `
-            <div class="stat-card events">
-                <div class="stat-icon">🎤</div>
-                <div class="stat-value">${stats.total_events}</div>
-                <div class="stat-label">Wszystkich wydarzeń</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-icon">📆</div>
-                <div class="stat-value">${stats.upcoming_events}</div>
-                <div class="stat-label">Nadchodzących</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-icon">✅</div>
-                <div class="stat-value">${stats.completed_events}</div>
-                <div class="stat-label">Zakończonych</div>
-            </div>
-            ${canAccessFinance ? `
-            <div class="stat-card revenue">
-                <div class="stat-icon">💰</div>
-                <div class="stat-value">${formatCurrency(stats.total_revenue)}</div>
-                <div class="stat-label">Przychody</div>
-            </div>
-            <div class="stat-card costs">
-                <div class="stat-icon">📉</div>
-                <div class="stat-value">${formatCurrency(stats.total_costs)}</div>
-                <div class="stat-label">Koszty</div>
-            </div>
-            <div class="stat-card profit">
-                <div class="stat-icon">📈</div>
-                <div class="stat-value ${stats.net_profit >= 0 ? 'positive' : 'negative'}">
-                    ${formatCurrency(stats.net_profit)}
-                </div>
-                <div class="stat-label">Zysk netto</div>
-            </div>
-            ` : `
-            <div class="stat-card">
-                <div class="stat-icon">🔒</div>
-                <div class="stat-value">-</div>
-                <div class="stat-label">Dane finansowe</div>
-            </div>
-            `}
-        `;
-        
-        // Load upcoming events
-        const events = await api('/api/events?status=upcoming');
-        const upcomingEl = document.getElementById('upcomingEvents');
-        
-        if (events.length === 0) {
-            upcomingEl.innerHTML = `
-                <div class="empty-state">
-                    <div class="icon">📅</div>
-                    <h3>Brak nadchodzących wydarzeń</h3>
-                    <p>Dodaj nowe wydarzenie w zakładce "Wydarzenia"</p>
-                </div>
-            `;
-        } else {
-            upcomingEl.innerHTML = events.slice(0, 5).map(event => `
-                <div class="event-card">
-                    <div class="event-date-box">
-                        <div class="day">${new Date(event.date).getDate()}</div>
-                        <div class="month">${getMonthShort(new Date(event.date).getMonth())}</div>
-                    </div>
-                    <div class="event-info">
-                        <h3>${event.name}</h3>
-                        ${event.genre ? `<span class="genre">${event.genre}</span>` : ''}
-                        <p class="description">${event.description || ''}</p>
-                        <div class="event-meta">
-                            <span>🎫 ${formatCurrency(event.ticket_price)}</span>
-                            <span>👥 ${event.expected_attendees} osób</span>
-                        </div>
-                    </div>
-                </div>
-            `).join('');
-        }
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
-    }
-}
-
-// ============== EVENTS ==============
-let eventsFilter = 'all';
-
-async function renderEvents() {
-    const content = document.getElementById('mainContent');
-    
-    content.innerHTML = `
-        <div class="page-header">
-            <h1>🎤 Wydarzenia</h1>
-            <div class="page-actions">
-                <button class="btn btn-primary" onclick="showEventModal()">
-                    + Nowe wydarzenie
-                </button>
-            </div>
-        </div>
-        
-        <div class="tabs">
-            <button class="tab ${eventsFilter === 'all' ? 'active' : ''}" onclick="filterEvents('all')">Wszystkie</button>
-            <button class="tab ${eventsFilter === 'upcoming' ? 'active' : ''}" onclick="filterEvents('upcoming')">Nadchodzące</button>
-            <button class="tab ${eventsFilter === 'archive' ? 'active' : ''}" onclick="filterEvents('archive')">Archiwum</button>
-        </div>
-        
-        <div class="event-list" id="eventList">
-            <div class="loading"><div class="spinner"></div></div>
-        </div>
-    `;
-    
-    await loadEvents();
-}
-
-async function filterEvents(filter) {
-    eventsFilter = filter;
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    document.querySelector(`.tab:nth-child(${filter === 'all' ? 1 : filter === 'upcoming' ? 2 : 3})`).classList.add('active');
-    await loadEvents();
-}
-
-async function loadEvents() {
-    try {
-        let url = '/api/events';
-        if (eventsFilter !== 'all') url += `?status=${eventsFilter}`;
-        
-        const events = await api(url);
-        const container = document.getElementById('eventList');
-        const canDelete = ['owner', 'manager'].includes(currentUser.role);
-        
-        if (events.length === 0) {
-            container.innerHTML = `
-                <div class="empty-state">
-                    <div class="icon">🎤</div>
-                    <h3>Brak wydarzeń</h3>
-                    <p>Kliknij "Nowe wydarzenie" aby dodać pierwsze</p>
-                </div>
-            `;
-            return;
-        }
-        
-        container.innerHTML = events.map(event => {
-            const date = new Date(event.date);
-            const isPast = date < new Date();
             
-            return `
-                <div class="event-card">
-                    <div class="event-date-box">
-                        <div class="day">${date.getDate()}</div>
-                        <div class="month">${getMonthShort(date.getMonth())}</div>
-                    </div>
-                    <div class="event-info">
-                        <h3>${event.name}</h3>
-                        ${event.genre ? `<span class="genre">${event.genre}</span>` : ''}
-                        ${isPast ? '<span class="badge badge-warning">Zakończone</span>' : '<span class="badge badge-success">Nadchodzące</span>'}
-                        <p class="description">${event.description || ''}</p>
-                        <div class="event-meta">
-                            <span>🎫 ${formatCurrency(event.ticket_price)}</span>
-                            <span>👥 ${event.expected_attendees} osób</span>
-                            ${event.actual_attendees ? `<span>✓ ${event.actual_attendees} przyszło</span>` : ''}
-                        </div>
-                    </div>
-                    <div class="event-actions">
-                        <button class="btn btn-sm btn-secondary" onclick="showEventModal(${event.id})">Edytuj</button>
-                        ${canDelete ? `<button class="btn btn-sm btn-danger" onclick="deleteEvent(${event.id})">Usuń</button>` : ''}
-                    </div>
-                </div>
-            `;
-        }).join('');
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
-    }
-}
-
-async function showEventModal(eventId = null) {
-    let event = null;
-    if (eventId) {
-        event = await api(`/api/events/${eventId}`);
-    }
-    
-    const modal = document.createElement('div');
-    modal.className = 'modal-overlay';
-    modal.innerHTML = `
-        <div class="modal">
-            <div class="modal-header">
-                <h2>${event ? 'Edytuj wydarzenie' : 'Nowe wydarzenie'}</h2>
-                <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
-            </div>
-            <div class="modal-body">
-                <form id="eventForm">
-                    <div class="form-group">
-                        <label>Nazwa *</label>
-                        <input type="text" name="name" value="${event?.name || ''}" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Data i godzina *</label>
-                        <input type="datetime-local" name="date" value="${event ? formatDateTimeLocal(event.date) : ''}" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Gatunek</label>
-                        <input type="text" name="genre" value="${event?.genre || ''}" placeholder="np. Rock, Jazz, Techno">
-                    </div>
-                    <div class="form-group">
-                        <label>Cena biletu (PLN)</label>
-                        <input type="number" name="ticket_price" value="${event?.ticket_price || ''}" step="0.01" min="0">
-                    </div>
-                    <div class="form-group">
-                        <label>Oczekiwana liczba gości</label>
-                        <input type="number" name="expected_attendees" value="${event?.expected_attendees || ''}" min="0">
-                    </div>
-                    ${event ? `
-                    <div class="form-group">
-                        <label>Rzeczywista liczba gości</label>
-                        <input type="number" name="actual_attendees" value="${event?.actual_attendees || ''}" min="0">
-                    </div>
-                    ` : ''}
-                    <div class="form-group">
-                        <label>Opis</label>
-                        <textarea name="description" rows="3">${event?.description || ''}</textarea>
-                    </div>
-                    <div class="form-group">
-                        <label>Notatki</label>
-                        <textarea name="notes" rows="2">${event?.notes || ''}</textarea>
-                    </div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">Anuluj</button>
-                <button class="btn btn-primary" onclick="saveEvent(${eventId})">Zapisz</button>
-            </div>
-        </div>
-    `;
-    
-    document.body.appendChild(modal);
-}
-
-async function saveEvent(eventId) {
-    const form = document.getElementById('eventForm');
-    const formData = new FormData(form);
-    
-    const data = {
-        name: formData.get('name'),
-        date: formData.get('date'),
-        genre: formData.get('genre') || null,
-        ticket_price: parseFloat(formData.get('ticket_price')) || 0,
-        expected_attendees: parseInt(formData.get('expected_attendees')) || 0,
-        description: formData.get('description') || null,
-        notes: formData.get('notes') || null
-    };
-    
-    if (eventId) {
-        data.actual_attendees = parseInt(formData.get('actual_attendees')) || null;
-    }
-    
-    try {
-        if (eventId) {
-            await api(`/api/events/${eventId}`, {
-                method: 'PUT',
-                body: JSON.stringify(data)
-            });
-            showToast('Sukces', 'Wydarzenie zaktualizowane', 'success');
-        } else {
-            await api('/api/events', {
-                method: 'POST',
-                body: JSON.stringify(data)
-            });
-            showToast('Sukces', 'Wydarzenie utworzone', 'success');
-        }
-        
-        document.querySelector('.modal-overlay').remove();
-        loadEvents();
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
-    }
-}
-
-async function deleteEvent(eventId) {
-    if (!confirm('Czy na pewno chcesz usunąć to wydarzenie?')) return;
-    
-    try {
-        await api(`/api/events/${eventId}`, { method: 'DELETE' });
-        showToast('Sukces', 'Wydarzenie usunięte', 'success');
-        loadEvents();
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
-    }
-}
-
-// ============== CALENDAR ==============
-let calendarYear = new Date().getFullYear();
-let calendarMonth = new Date().getMonth();
-
-async function renderCalendar() {
-    const content = document.getElementById('mainContent');
-    
-    content.innerHTML = `
-        <div class="page-header">
-            <h1>📅 Kalendarz</h1>
-        </div>
-        
-        <div class="calendar-container">
-            <div class="calendar-header">
-                <div class="calendar-nav">
-                    <button onclick="changeMonth(-1)">◀</button>
-                </div>
-                <h3 id="calendarTitle">${getMonthName(calendarMonth)} ${calendarYear}</h3>
-                <div class="calendar-nav">
-                    <button onclick="changeMonth(1)">▶</button>
-                </div>
-            </div>
-            <div class="calendar-grid" id="calendarGrid">
-                <!-- Calendar will be rendered here -->
-            </div>
-        </div>
-    `;
-    
-    await loadCalendar();
-}
-
-async function changeMonth(delta) {
-    calendarMonth += delta;
-    if (calendarMonth < 0) {
-        calendarMonth = 11;
-        calendarYear--;
-    } else if (calendarMonth > 11) {
-        calendarMonth = 0;
-        calendarYear++;
-    }
-    
-    document.getElementById('calendarTitle').textContent = `${getMonthName(calendarMonth)} ${calendarYear}`;
-    await loadCalendar();
-}
-
-async function loadCalendar() {
-    try {
-        const events = await api(`/api/calendar/${calendarYear}/${calendarMonth + 1}`);
-        const grid = document.getElementById('calendarGrid');
-        
-        // Day headers
-        const days = ['Pon', 'Wt', 'Śr', 'Czw', 'Pt', 'Sob', 'Ndz'];
-        let html = days.map(d => `<div class="calendar-day-header">${d}</div>`).join('');
-        
-        // Calculate first day and days in month
-        const firstDay = new Date(calendarYear, calendarMonth, 1);
-        const lastDay = new Date(calendarYear, calendarMonth + 1, 0);
-        const startDayOfWeek = (firstDay.getDay() + 6) % 7; // Monday = 0
-        const daysInMonth = lastDay.getDate();
-        
-        // Previous month days
-        const prevMonthDays = new Date(calendarYear, calendarMonth, 0).getDate();
-        for (let i = startDayOfWeek - 1; i >= 0; i--) {
-            html += `<div class="calendar-day other-month"><span class="day-number">${prevMonthDays - i}</span></div>`;
-        }
-        
-        // Current month days
-        const today = new Date();
-        for (let day = 1; day <= daysInMonth; day++) {
-            const isToday = today.getDate() === day && 
-                           today.getMonth() === calendarMonth && 
-                           today.getFullYear() === calendarYear;
+        case 'user_offline':
+            updateUserStatus(data.data.user_id, false, data.data.full_name);
+            break;
             
-            const dayEvents = events[day] || [];
+        case 'user_typing':
+            showTypingIndicator(data.data.full_name);
+            break;
             
-            html += `
-                <div class="calendar-day ${isToday ? 'today' : ''}" onclick="showEventModal(null, '${calendarYear}-${String(calendarMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}')">
-                    <span class="day-number">${day}</span>
-                    ${dayEvents.map(e => `
-                        <div class="calendar-event ${e.status === 'completed' ? 'completed' : ''}" 
-                             onclick="event.stopPropagation(); showEventModal(${e.id})">
-                            ${e.name}
-                        </div>
-                    `).join('')}
-                </div>
-            `;
-        }
-        
-        // Next month days
-        const totalCells = startDayOfWeek + daysInMonth;
-        const remainingCells = totalCells % 7 === 0 ? 0 : 7 - (totalCells % 7);
-        for (let i = 1; i <= remainingCells; i++) {
-            html += `<div class="calendar-day other-month"><span class="day-number">${i}</span></div>`;
-        }
-        
-        grid.innerHTML = html;
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
+        case 'pong':
+            // Keep-alive response
+            break;
     }
 }
 
-// ============== REVENUES ==============
-async function renderRevenues() {
-    if (!['owner', 'manager'].includes(currentUser.role)) {
-        document.getElementById('mainContent').innerHTML = `
-            <div class="restricted-notice">
-                <div class="icon">🔒</div>
-                <h3>Brak dostępu</h3>
-                <p>Tylko menedżerowie i właściciele mogą przeglądać przychody.</p>
-            </div>
-        `;
-        return;
-    }
-    
-    const content = document.getElementById('mainContent');
-    
-    content.innerHTML = `
-        <div class="page-header">
-            <h1>💰 Przychody</h1>
-            <div class="page-actions">
-                <button class="btn btn-primary" onclick="showRevenueModal()">+ Nowy przychód</button>
-            </div>
-        </div>
-        
-        <div class="card">
-            <div class="table-container">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Data</th>
-                            <th>Wydarzenie</th>
-                            <th>Opis</th>
-                            <th>Kategoria</th>
-                            <th>Kwota</th>
-                            <th>Akcje</th>
-                        </tr>
-                    </thead>
-                    <tbody id="revenuesTable">
-                        <tr><td colspan="6"><div class="loading"><div class="spinner"></div></div></td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    `;
-    
-    await loadRevenues();
-}
-
-async function loadRevenues() {
-    try {
-        const [revenues, events] = await Promise.all([
-            api('/api/revenues'),
-            api('/api/events')
-        ]);
-        
-        const eventsMap = Object.fromEntries(events.map(e => [e.id, e.name]));
-        const tbody = document.getElementById('revenuesTable');
-        
-        if (revenues.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Brak przychodów</td></tr>';
-            return;
-        }
-        
-        tbody.innerHTML = revenues.map(rev => `
-            <tr>
-                <td>${formatDate(rev.created_at)}</td>
-                <td>${rev.event_id ? eventsMap[rev.event_id] || '-' : '-'}</td>
-                <td>${rev.description}</td>
-                <td>${translateCategory(rev.category)}</td>
-                <td><strong>${formatCurrency(rev.amount)}</strong></td>
-                <td class="actions-cell">
-                    <button class="btn btn-sm btn-danger" onclick="deleteRevenue(${rev.id})">Usuń</button>
-                </td>
-            </tr>
-        `).join('');
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
-    }
-}
-
-async function showRevenueModal() {
-    const events = await api('/api/events');
-    
-    const modal = document.createElement('div');
-    modal.className = 'modal-overlay';
-    modal.innerHTML = `
-        <div class="modal">
-            <div class="modal-header">
-                <h2>Nowy przychód</h2>
-                <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
-            </div>
-            <div class="modal-body">
-                <form id="revenueForm">
-                    <div class="form-group">
-                        <label>Wydarzenie</label>
-                        <select name="event_id">
-                            <option value="">-- Bez wydarzenia --</option>
-                            ${events.map(e => `<option value="${e.id}">${e.name}</option>`).join('')}
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>Opis *</label>
-                        <input type="text" name="description" required placeholder="np. Sprzedaż biletów">
-                    </div>
-                    <div class="form-group">
-                        <label>Kwota (PLN) *</label>
-                        <input type="number" name="amount" step="0.01" min="0" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Kategoria</label>
-                        <select name="category">
-                            <option value="tickets">Bilety</option>
-                            <option value="bar">Bar</option>
-                            <option value="merchandise">Merch</option>
-                            <option value="other">Inne</option>
-                        </select>
-                    </div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">Anuluj</button>
-                <button class="btn btn-primary" onclick="saveRevenue()">Zapisz</button>
-            </div>
-        </div>
-    `;
-    
-    document.body.appendChild(modal);
-}
-
-async function saveRevenue() {
-    const form = document.getElementById('revenueForm');
-    const formData = new FormData(form);
-    
-    try {
-        await api('/api/revenues', {
-            method: 'POST',
-            body: JSON.stringify({
-                event_id: formData.get('event_id') ? parseInt(formData.get('event_id')) : null,
-                description: formData.get('description'),
-                amount: parseFloat(formData.get('amount')),
-                category: formData.get('category')
-            })
-        });
-        
-        document.querySelector('.modal-overlay').remove();
-        showToast('Sukces', 'Przychód dodany', 'success');
-        loadRevenues();
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
-    }
-}
-
-async function deleteRevenue(id) {
-    if (!confirm('Usunąć ten przychód?')) return;
-    
-    try {
-        await api(`/api/revenues/${id}`, { method: 'DELETE' });
-        showToast('Sukces', 'Przychód usunięty', 'success');
-        loadRevenues();
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
-    }
-}
-
-// ============== COSTS ==============
-async function renderCosts() {
-    if (!['owner', 'manager'].includes(currentUser.role)) {
-        document.getElementById('mainContent').innerHTML = `
-            <div class="restricted-notice">
-                <div class="icon">🔒</div>
-                <h3>Brak dostępu</h3>
-                <p>Tylko menedżerowie i właściciele mogą przeglądać koszty.</p>
-            </div>
-        `;
-        return;
-    }
-    
-    const content = document.getElementById('mainContent');
-    
-    content.innerHTML = `
-        <div class="page-header">
-            <h1>📉 Koszty</h1>
-            <div class="page-actions">
-                <button class="btn btn-primary" onclick="showCostModal()">+ Nowy koszt</button>
-            </div>
-        </div>
-        
-        <div class="card">
-            <div class="table-container">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Data</th>
-                            <th>Wydarzenie</th>
-                            <th>Opis</th>
-                            <th>Kategoria</th>
-                            <th>Kwota</th>
-                            <th>Akcje</th>
-                        </tr>
-                    </thead>
-                    <tbody id="costsTable">
-                        <tr><td colspan="6"><div class="loading"><div class="spinner"></div></div></td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    `;
-    
-    await loadCosts();
-}
-
-async function loadCosts() {
-    try {
-        const [costs, events] = await Promise.all([
-            api('/api/costs'),
-            api('/api/events')
-        ]);
-        
-        const eventsMap = Object.fromEntries(events.map(e => [e.id, e.name]));
-        const tbody = document.getElementById('costsTable');
-        
-        if (costs.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Brak kosztów</td></tr>';
-            return;
-        }
-        
-        tbody.innerHTML = costs.map(cost => `
-            <tr>
-                <td>${formatDate(cost.created_at)}</td>
-                <td>${cost.event_id ? eventsMap[cost.event_id] || '-' : '-'}</td>
-                <td>${cost.description}</td>
-                <td>${translateCategory(cost.category)}</td>
-                <td><strong>${formatCurrency(cost.amount)}</strong></td>
-                <td class="actions-cell">
-                    <button class="btn btn-sm btn-danger" onclick="deleteCost(${cost.id})">Usuń</button>
-                </td>
-            </tr>
-        `).join('');
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
-    }
-}
-
-async function showCostModal() {
-    const events = await api('/api/events');
-    
-    const modal = document.createElement('div');
-    modal.className = 'modal-overlay';
-    modal.innerHTML = `
-        <div class="modal">
-            <div class="modal-header">
-                <h2>Nowy koszt</h2>
-                <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
-            </div>
-            <div class="modal-body">
-                <form id="costForm">
-                    <div class="form-group">
-                        <label>Wydarzenie</label>
-                        <select name="event_id">
-                            <option value="">-- Bez wydarzenia --</option>
-                            ${events.map(e => `<option value="${e.id}">${e.name}</option>`).join('')}
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>Opis *</label>
-                        <input type="text" name="description" required placeholder="np. Zakup alkoholi">
-                    </div>
-                    <div class="form-group">
-                        <label>Kwota (PLN) *</label>
-                        <input type="number" name="amount" step="0.01" min="0" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Kategoria</label>
-                        <select name="category">
-                            <option value="artist_fee">Honorarium artysty</option>
-                            <option value="staff">Personel</option>
-                            <option value="bar_stock">Zaopatrzenie baru</option>
-                            <option value="equipment">Sprzęt</option>
-                            <option value="marketing">Marketing</option>
-                            <option value="other">Inne</option>
-                        </select>
-                    </div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">Anuluj</button>
-                <button class="btn btn-primary" onclick="saveCost()">Zapisz</button>
-            </div>
-        </div>
-    `;
-    
-    document.body.appendChild(modal);
-}
-
-async function saveCost() {
-    const form = document.getElementById('costForm');
-    const formData = new FormData(form);
-    
-    try {
-        await api('/api/costs', {
-            method: 'POST',
-            body: JSON.stringify({
-                event_id: formData.get('event_id') ? parseInt(formData.get('event_id')) : null,
-                description: formData.get('description'),
-                amount: parseFloat(formData.get('amount')),
-                category: formData.get('category')
-            })
-        });
-        
-        document.querySelector('.modal-overlay').remove();
-        showToast('Sukces', 'Koszt dodany', 'success');
-        loadCosts();
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
-    }
-}
-
-async function deleteCost(id) {
-    if (!confirm('Usunąć ten koszt?')) return;
-    
-    try {
-        await api(`/api/costs/${id}`, { method: 'DELETE' });
-        showToast('Sukces', 'Koszt usunięty', 'success');
-        loadCosts();
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
-    }
-}
-
-// ============== STAFF ==============
-async function renderStaff() {
-    const content = document.getElementById('mainContent');
-    const canManage = ['owner', 'manager'].includes(currentUser.role);
-    
-    content.innerHTML = `
-        <div class="page-header">
-            <h1>👥 Personel</h1>
-            ${canManage ? `
-            <div class="page-actions">
-                <button class="btn btn-primary" onclick="showStaffModal()">+ Przypisz osobę</button>
-            </div>
-            ` : ''}
-        </div>
-        
-        <div class="card">
-            <div class="table-container">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Wydarzenie</th>
-                            <th>Stanowisko</th>
-                            <th>Imię i nazwisko</th>
-                            <th>Godziny</th>
-                            <th>Stawka</th>
-                            <th>Suma</th>
-                            ${canManage ? '<th>Akcje</th>' : ''}
-                        </tr>
-                    </thead>
-                    <tbody id="staffTable">
-                        <tr><td colspan="7"><div class="loading"><div class="spinner"></div></div></td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    `;
-    
-    await loadStaff();
-}
-
-async function loadStaff() {
-    try {
-        const [staff, events] = await Promise.all([
-            api('/api/staff'),
-            api('/api/events')
-        ]);
-        
-        const eventsMap = Object.fromEntries(events.map(e => [e.id, e.name]));
-        const tbody = document.getElementById('staffTable');
-        const canManage = ['owner', 'manager'].includes(currentUser.role);
-        
-        if (staff.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="7" class="empty-state">Brak przypisań personelu</td></tr>`;
-            return;
-        }
-        
-        tbody.innerHTML = staff.map(s => `
-            <tr>
-                <td>${eventsMap[s.event_id] || '-'}</td>
-                <td>${s.position}</td>
-                <td>${s.name}</td>
-                <td>${s.hours || '-'}</td>
-                <td>${s.hourly_rate ? formatCurrency(s.hourly_rate) + '/h' : '-'}</td>
-                <td><strong>${s.hours && s.hourly_rate ? formatCurrency(s.hours * s.hourly_rate) : '-'}</strong></td>
-                ${canManage ? `
-                <td class="actions-cell">
-                    <button class="btn btn-sm btn-danger" onclick="deleteStaff(${s.id})">Usuń</button>
-                </td>
-                ` : ''}
-            </tr>
-        `).join('');
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
-    }
-}
-
-async function showStaffModal() {
-    const events = await api('/api/events');
-    
-    const modal = document.createElement('div');
-    modal.className = 'modal-overlay';
-    modal.innerHTML = `
-        <div class="modal">
-            <div class="modal-header">
-                <h2>Przypisz personel</h2>
-                <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
-            </div>
-            <div class="modal-body">
-                <form id="staffForm">
-                    <div class="form-group">
-                        <label>Wydarzenie *</label>
-                        <select name="event_id" required>
-                            <option value="">-- Wybierz --</option>
-                            ${events.map(e => `<option value="${e.id}">${e.name}</option>`).join('')}
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>Stanowisko *</label>
-                        <select name="position" required>
-                            ${JOB_POSITIONS.map(p => `<option value="${p}">${p}</option>`).join('')}
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>Imię i nazwisko *</label>
-                        <input type="text" name="name" required placeholder="np. Jan Kowalski">
-                    </div>
-                    <div class="form-group">
-                        <label>Liczba godzin</label>
-                        <input type="number" name="hours" step="0.5" min="0" placeholder="np. 8">
-                    </div>
-                    <div class="form-group">
-                        <label>Stawka godzinowa (PLN)</label>
-                        <input type="number" name="hourly_rate" step="0.01" min="0" placeholder="np. 40">
-                    </div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">Anuluj</button>
-                <button class="btn btn-primary" onclick="saveStaff()">Zapisz</button>
-            </div>
-        </div>
-    `;
-    
-    document.body.appendChild(modal);
-}
-
-async function saveStaff() {
-    const form = document.getElementById('staffForm');
-    const formData = new FormData(form);
-    
-    try {
-        await api('/api/staff', {
-            method: 'POST',
-            body: JSON.stringify({
-                event_id: parseInt(formData.get('event_id')),
-                position: formData.get('position'),
-                name: formData.get('name'),
-                hours: parseFloat(formData.get('hours')) || null,
-                hourly_rate: parseFloat(formData.get('hourly_rate')) || null
-            })
-        });
-        
-        document.querySelector('.modal-overlay').remove();
-        showToast('Sukces', 'Personel przypisany', 'success');
-        loadStaff();
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
-    }
-}
-
-async function deleteStaff(id) {
-    if (!confirm('Usunąć to przypisanie?')) return;
-    
-    try {
-        await api(`/api/staff/${id}`, { method: 'DELETE' });
-        showToast('Sukces', 'Przypisanie usunięte', 'success');
-        loadStaff();
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
-    }
-}
-
-// ============== RECEIPTS ==============
-async function renderReceipts() {
-    if (!['owner', 'manager'].includes(currentUser.role)) {
-        document.getElementById('mainContent').innerHTML = `
-            <div class="restricted-notice">
-                <div class="icon">🔒</div>
-                <h3>Brak dostępu</h3>
-                <p>Tylko menedżerowie i właściciele mogą przeglądać paragony.</p>
-            </div>
-        `;
-        return;
-    }
-    
-    const content = document.getElementById('mainContent');
-    
-    content.innerHTML = `
-        <div class="page-header">
-            <h1>🧾 Paragony</h1>
-        </div>
-        
-        <div class="card">
-            <div class="card-header">
-                <h3>📷 Zeskanuj paragon</h3>
-            </div>
-            <div class="card-body">
-                <div class="receipt-upload" id="receiptUpload" onclick="document.getElementById('receiptInput').click()">
-                    <input type="file" id="receiptInput" accept="image/*" capture="environment" onchange="uploadReceipt(this)">
-                    <div class="upload-icon">📷</div>
-                    <p>Kliknij aby zrobić zdjęcie lub wybrać plik</p>
-                    <p style="font-size: 0.875rem; color: var(--text-muted);">Obsługiwane formaty: JPG, PNG</p>
-                </div>
-                
-                <div id="receiptPreview" style="display: none">
-                    <div class="receipt-preview">
-                        <img id="previewImage" src="" alt="Podgląd">
-                    </div>
-                    <div class="loading" id="scanningLoader" style="display: none">
-                        <div class="spinner"></div>
-                        <p style="margin-left: 10px">Skanowanie...</p>
-                    </div>
-                </div>
-                
-                <div id="ocrResult" style="display: none">
-                    <!-- OCR results will be shown here -->
-                </div>
-            </div>
-        </div>
-        
-        <div class="card">
-            <div class="card-header">
-                <h3>📋 Historia paragonów</h3>
-            </div>
-            <div class="card-body">
-                <div class="table-container">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Data</th>
-                                <th>Sklep</th>
-                                <th>Kwota</th>
-                                <th>Status</th>
-                                <th>Akcje</th>
-                            </tr>
-                        </thead>
-                        <tbody id="receiptsTable">
-                            <tr><td colspan="5"><div class="loading"><div class="spinner"></div></div></td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    `;
-    
-    await loadReceipts();
-}
-
-async function loadReceipts() {
-    try {
-        const receipts = await api('/api/receipts');
-        const tbody = document.getElementById('receiptsTable');
-        
-        if (receipts.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Brak paragonów</td></tr>';
-            return;
-        }
-        
-        tbody.innerHTML = receipts.map(r => `
-            <tr>
-                <td>${formatDate(r.created_at)}</td>
-                <td>${r.store_name || 'Nieznany'}</td>
-                <td>${r.total_amount ? formatCurrency(r.total_amount) : '-'}</td>
-                <td>
-                    <span class="badge ${r.status === 'processed' ? 'badge-success' : 'badge-warning'}">
-                        ${r.status === 'processed' ? 'Przetworzony' : 'Oczekuje'}
-                    </span>
-                </td>
-                <td class="actions-cell">
-                    <button class="btn btn-sm btn-secondary" onclick="viewReceiptImage(${r.id})">Podgląd</button>
-                    ${r.status !== 'processed' ? `
-                    <button class="btn btn-sm btn-primary" onclick="showCreateCostFromReceipt(${r.id}, ${r.total_amount || 0}, '${r.store_name || ''}')">
-                        Utwórz koszt
-                    </button>
-                    ` : ''}
-                </td>
-            </tr>
-        `).join('');
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
-    }
-}
-
-async function uploadReceipt(input) {
-    const file = input.files[0];
-    if (!file) return;
-    
-    // Show preview
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-        document.getElementById('previewImage').src = e.target.result;
-        document.getElementById('receiptPreview').style.display = 'block';
-        document.getElementById('scanningLoader').style.display = 'flex';
-        document.getElementById('ocrResult').style.display = 'none';
-        
-        // Upload and scan
-        const formData = new FormData();
-        formData.append('image', file);
-        
-        try {
-            const response = await fetch(`${API_URL}/api/receipts/scan`, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${authToken}`
-                },
-                body: formData
-            });
-            
-            const result = await response.json();
-            
-            document.getElementById('scanningLoader').style.display = 'none';
-            
-            // Show result
-            const ocrDiv = document.getElementById('ocrResult');
-            ocrDiv.style.display = 'block';
-            ocrDiv.innerHTML = `
-                <div class="ocr-result">
-                    <h4>🔍 Wynik skanowania</h4>
-                    <div class="ocr-field">
-                        <span class="label">Sklep:</span>
-                        <span class="value">${result.parsed.store_name || 'Nie rozpoznano'}</span>
-                    </div>
-                    <div class="ocr-field">
-                        <span class="label">Kwota:</span>
-                        <span class="value">${result.parsed.total_amount ? formatCurrency(result.parsed.total_amount) : 'Nie rozpoznano'}</span>
-                    </div>
-                    <div class="ocr-field">
-                        <span class="label">Data:</span>
-                        <span class="value">${result.parsed.date || 'Nie rozpoznano'}</span>
-                    </div>
-                    
-                    <div style="margin-top: 1rem">
-                        <button class="btn btn-primary" onclick="showCreateCostFromReceipt(${result.receipt_id}, ${result.parsed.total_amount || 0}, '${result.parsed.store_name || ''}')">
-                            Utwórz koszt z paragonu
-                        </button>
-                    </div>
-                </div>
-            `;
-            
-            showToast('Sukces', 'Paragon zeskanowany', 'success');
-            loadReceipts();
-        } catch (error) {
-            document.getElementById('scanningLoader').style.display = 'none';
-            showToast('Błąd', 'Nie udało się zeskanować paragonu', 'error');
-        }
-    };
-    reader.readAsDataURL(file);
-}
-
-async function viewReceiptImage(receiptId) {
-    try {
-        const data = await api(`/api/receipts/${receiptId}/image`);
-        
-        const modal = document.createElement('div');
-        modal.className = 'modal-overlay';
-        modal.innerHTML = `
-            <div class="modal" style="max-width: 600px">
-                <div class="modal-header">
-                    <h2>Podgląd paragonu</h2>
-                    <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
-                </div>
-                <div class="modal-body" style="text-align: center">
-                    <img src="data:${data.image_type};base64,${data.image_data}" 
-                         style="max-width: 100%; border-radius: 8px;">
-                </div>
-            </div>
-        `;
-        
-        document.body.appendChild(modal);
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
-    }
-}
-
-async function showCreateCostFromReceipt(receiptId, amount, storeName) {
-    const events = await api('/api/events');
-    
-    const modal = document.createElement('div');
-    modal.className = 'modal-overlay';
-    modal.innerHTML = `
-        <div class="modal">
-            <div class="modal-header">
-                <h2>Utwórz koszt z paragonu</h2>
-                <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
-            </div>
-            <div class="modal-body">
-                <form id="receiptCostForm">
-                    <div class="form-group">
-                        <label>Wydarzenie</label>
-                        <select name="event_id">
-                            <option value="">-- Bez wydarzenia --</option>
-                            ${events.map(e => `<option value="${e.id}">${e.name}</option>`).join('')}
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label>Opis</label>
-                        <input type="text" name="description" value="Paragon: ${storeName || 'Sklep'}">
-                    </div>
-                    <div class="form-group">
-                        <label>Kwota (PLN) *</label>
-                        <input type="number" name="amount" value="${amount}" step="0.01" min="0" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Kategoria</label>
-                        <select name="category">
-                            <option value="bar_stock" selected>Zaopatrzenie baru</option>
-                            <option value="equipment">Sprzęt</option>
-                            <option value="marketing">Marketing</option>
-                            <option value="other">Inne</option>
-                        </select>
-                    </div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">Anuluj</button>
-                <button class="btn btn-primary" onclick="saveCostFromReceipt(${receiptId})">Utwórz koszt</button>
-            </div>
-        </div>
-    `;
-    
-    document.body.appendChild(modal);
-}
-
-async function saveCostFromReceipt(receiptId) {
-    const form = document.getElementById('receiptCostForm');
-    const formData = new FormData(form);
-    
-    try {
-        await api(`/api/receipts/${receiptId}/create-cost`, {
-            method: 'POST',
-            body: JSON.stringify({
-                event_id: formData.get('event_id') ? parseInt(formData.get('event_id')) : null,
-                description: formData.get('description'),
-                amount: parseFloat(formData.get('amount')),
-                category: formData.get('category')
-            })
-        });
-        
-        document.querySelector('.modal-overlay').remove();
-        showToast('Sukces', 'Koszt utworzony z paragonu', 'success');
-        loadReceipts();
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
-    }
-}
-
-// ============== CHAT ==============
-let chatUsers = [];
-
-async function renderChat() {
-    const content = document.getElementById('mainContent');
-    
-    content.innerHTML = `
-        <div class="page-header">
-            <h1>💬 Czat</h1>
-        </div>
-        
-        <div class="chat-container">
-            <div class="chat-sidebar">
-                <div class="chat-sidebar-header">
-                    <h3>Rozmowy</h3>
-                    <label class="notification-toggle">
-                        <input type="checkbox" ${notificationsEnabled ? 'checked' : ''} onchange="toggleNotifications(this.checked)">
-                        🔔
-                    </label>
-                </div>
-                <div class="chat-user-list">
-                    <div class="chat-channel active" data-recipient="" onclick="selectChatChannel(null)">
-                        <span class="channel-icon">📢</span>
-                        <span class="channel-name">Ogólny</span>
-                        <span class="unread-badge" id="unread-public" style="display: none">0</span>
-                    </div>
-                    <div id="chatUsersList">
-                        <!-- Users will be loaded here -->
-                    </div>
-                </div>
-            </div>
-            
-            <div class="chat-main">
-                <div class="chat-header">
-                    <h3 id="chatTitle">📢 Ogólny</h3>
-                    <span class="private-indicator" id="privateIndicator" style="display: none">🔒 Prywatna rozmowa</span>
-                </div>
-                <div class="chat-messages" id="chatMessages">
-                    <div class="loading"><div class="spinner"></div></div>
-                </div>
-                <div class="typing-indicator" id="typingIndicator" style="display: none"></div>
-                <div class="chat-input-container">
-                    <input type="text" id="chatInput" placeholder="Napisz wiadomość..." 
-                           onkeypress="handleChatKeypress(event)" oninput="handleChatInput()">
-                    <button class="btn btn-primary" onclick="sendChatMessage()">Wyślij</button>
-                </div>
-            </div>
-        </div>
-    `;
-    
-    await loadChatUsers();
-    await loadChatMessages();
-}
-
-function toggleNotifications(enabled) {
-    notificationsEnabled = enabled;
-    localStorage.setItem('notificationsEnabled', enabled);
-    showToast('Powiadomienia', enabled ? 'Włączone' : 'Wyłączone', 'info');
-}
-
-async function loadChatUsers() {
-    try {
-        chatUsers = await api('/api/chat/users');
-        const container = document.getElementById('chatUsersList');
-        
-        container.innerHTML = chatUsers.map(user => `
-            <div class="chat-user ${currentChatRecipient === user.id ? 'active' : ''}" 
-                 data-user-id="${user.id}" 
-                 onclick="selectChatChannel(${user.id})">
-                <span class="online-status ${user.online ? 'online' : ''}"></span>
-                <span class="user-name">${user.name}</span>
-                <span class="unread-badge" id="unread-${user.id}" style="display: none">0</span>
-            </div>
-        `).join('');
-        
-        updateUnreadBadges();
-    } catch (error) {
-        console.error('Error loading chat users:', error);
-    }
-}
-
-async function selectChatChannel(recipientId) {
-    currentChatRecipient = recipientId;
-    
-    // Update UI
-    document.querySelectorAll('.chat-channel, .chat-user').forEach(el => {
-        el.classList.remove('active');
-    });
-    
-    if (recipientId === null) {
-        document.querySelector('.chat-channel[data-recipient=""]').classList.add('active');
-        document.getElementById('chatTitle').textContent = '📢 Ogólny';
-        document.getElementById('privateIndicator').style.display = 'none';
+function sendChatMessage(content) {
+    if (state.ws?.readyState === WebSocket.OPEN) {
+        state.ws.send(JSON.stringify({
+            type: 'message',
+            content: content
+        }));
     } else {
-        document.querySelector(`.chat-user[data-user-id="${recipientId}"]`)?.classList.add('active');
-        const user = chatUsers.find(u => u.id === recipientId);
-        document.getElementById('chatTitle').textContent = user ? user.name : 'Rozmowa';
-        document.getElementById('privateIndicator').style.display = 'inline';
+        // Fallback to REST
+        sendChatMessageREST(content);
     }
-    
-    // Clear unread
-    const key = recipientId || 'public';
-    unreadMessages[key] = 0;
-    updateUnreadBadges();
-    
-    await loadChatMessages();
 }
 
-async function loadChatMessages() {
+async function sendChatMessageREST(content) {
     try {
-        let url = '/api/chat/messages';
-        if (currentChatRecipient) {
-            url += `?recipient_id=${currentChatRecipient}`;
-        }
-        
-        const messages = await api(url);
-        const container = document.getElementById('chatMessages');
-        
-        if (messages.length === 0) {
-            container.innerHTML = `
-                <div class="empty-state">
-                    <div class="icon">💬</div>
-                    <h3>Brak wiadomości</h3>
-                    <p>Rozpocznij rozmowę!</p>
-                </div>
-            `;
-            return;
-        }
-        
-        container.innerHTML = messages.map(msg => createMessageHTML(msg)).join('');
-        container.scrollTop = container.scrollHeight;
+        const data = await api('/api/chat/messages', {
+            method: 'POST',
+            body: JSON.stringify({ content, message_type: 'text' })
+        });
+        addChatMessage(data);
     } catch (error) {
-        showToast('Błąd', error.message, 'error');
+        toast('Nie udało się wysłać wiadomości', 'error');
     }
 }
 
-function createMessageHTML(msg) {
-    const isOwn = msg.sender_id === currentUser.id;
-    return `
-        <div class="message ${isOwn ? 'own' : ''} ${msg.is_private ? 'private' : ''}">
-            <div class="message-header">
-                <span class="message-sender">${isOwn ? 'Ty' : msg.sender_name}</span>
-                <span class="message-time">${formatTime(msg.timestamp)}</span>
-            </div>
-            <div class="message-content">${escapeHtml(msg.content)}</div>
-        </div>
-    `;
-}
-
-function appendMessage(msg) {
-    const container = document.getElementById('chatMessages');
-    if (!container) return;
-    
-    // Remove empty state if present
-    const emptyState = container.querySelector('.empty-state');
-    if (emptyState) emptyState.remove();
-    
-    container.insertAdjacentHTML('beforeend', createMessageHTML(msg));
-    container.scrollTop = container.scrollHeight;
+function sendTypingIndicator() {
+    if (state.ws?.readyState === WebSocket.OPEN) {
+        state.ws.send(JSON.stringify({ type: 'typing' }));
+    }
 }
 
 let typingTimeout = null;
-
-function handleChatInput() {
-    if (!websocket || websocket.readyState !== WebSocket.OPEN) return;
+function showTypingIndicator(userName) {
+    if (userName === state.user.full_name) return;
     
-    websocket.send(JSON.stringify({ 
-        type: 'typing',
-        recipient_id: currentChatRecipient
-    }));
+    $('#typing-user').textContent = userName;
+    $('#typing-indicator').classList.remove('hidden');
     
     clearTimeout(typingTimeout);
     typingTimeout = setTimeout(() => {
-        websocket.send(JSON.stringify({ 
-            type: 'stop_typing',
-            recipient_id: currentChatRecipient
-        }));
-    }, 2000);
+        $('#typing-indicator').classList.add('hidden');
+    }, 3000);
 }
 
-function handleChatKeypress(event) {
-    if (event.key === 'Enter' && !event.shiftKey) {
-        event.preventDefault();
-        sendChatMessage();
-    }
-}
-
-function sendChatMessage() {
-    const input = document.getElementById('chatInput');
-    const content = input.value.trim();
-    
-    if (!content || !websocket || websocket.readyState !== WebSocket.OPEN) return;
-    
-    websocket.send(JSON.stringify({
-        type: 'message',
-        content: content,
-        recipient_id: currentChatRecipient
-    }));
-    
-    input.value = '';
-    
-    // Stop typing
-    clearTimeout(typingTimeout);
-    websocket.send(JSON.stringify({ 
-        type: 'stop_typing',
-        recipient_id: currentChatRecipient
-    }));
-}
-
-function updateOnlineStatus() {
-    chatUsers.forEach(user => {
-        const el = document.querySelector(`.chat-user[data-user-id="${user.id}"] .online-status`);
-        if (el) {
-            el.classList.toggle('online', onlineUsers.includes(user.id));
-        }
-    });
-}
-
-function updateTypingIndicator() {
-    const indicator = document.getElementById('typingIndicator');
-    if (!indicator) return;
-    
-    const names = Object.values(typingUsers);
-    if (names.length === 0) {
-        indicator.style.display = 'none';
-    } else {
-        indicator.style.display = 'block';
-        indicator.textContent = names.length === 1 
-            ? `${names[0]} pisze...` 
-            : `${names.join(', ')} piszą...`;
-    }
-}
-
-function updateUnreadBadges() {
-    // Public channel
-    const publicBadge = document.getElementById('unread-public');
-    if (publicBadge) {
-        const publicCount = unreadMessages['public'] || 0;
-        publicBadge.textContent = publicCount;
-        publicBadge.style.display = publicCount > 0 ? 'inline' : 'none';
-    }
-    
-    // User channels
-    chatUsers.forEach(user => {
-        const badge = document.getElementById(`unread-${user.id}`);
-        if (badge) {
-            const count = unreadMessages[user.id] || 0;
-            badge.textContent = count;
-            badge.style.display = count > 0 ? 'inline' : 'none';
-        }
-    });
-    
-    // Sidebar badge
-    const totalUnread = Object.values(unreadMessages).reduce((a, b) => a + b, 0);
-    const navBadge = document.getElementById('chatBadge');
-    if (navBadge) {
-        navBadge.textContent = totalUnread;
-        navBadge.style.display = totalUnread > 0 ? 'inline' : 'none';
-    }
-}
-
-// ============== USERS ==============
-async function renderUsers() {
-    if (!['owner', 'manager'].includes(currentUser.role)) {
-        document.getElementById('mainContent').innerHTML = `
-            <div class="restricted-notice">
-                <div class="icon">🔒</div>
-                <h3>Brak dostępu</h3>
-                <p>Tylko menedżerowie i właściciele mogą zarządzać użytkownikami.</p>
-            </div>
-        `;
-        return;
-    }
-    
-    const content = document.getElementById('mainContent');
-    
-    content.innerHTML = `
-        <div class="page-header">
-            <h1>⚙️ Użytkownicy</h1>
-            <div class="page-actions">
-                <button class="btn btn-primary" onclick="showUserModal()">+ Nowy użytkownik</button>
-            </div>
-        </div>
-        
-        <div class="user-cards" id="userCards">
-            <div class="loading"><div class="spinner"></div></div>
-        </div>
-    `;
-    
-    await loadUsers();
-}
-
-async function loadUsers() {
+async function loadChatHistory() {
     try {
-        const users = await api('/api/users');
-        const container = document.getElementById('userCards');
+        const data = await api('/api/chat/history?limit=100');
+        state.chatMessages = data.messages;
+        state.chatUsers = data.users_online;
+        state.unreadCount = data.total_unread;
         
-        container.innerHTML = users.map(user => {
-            const initials = user.full_name.split(' ').map(n => n[0]).join('').toUpperCase();
-            const canEdit = currentUser.role === 'owner' || 
-                           (currentUser.role === 'manager' && user.role === 'worker');
-            const canDelete = canEdit && user.id !== currentUser.id;
-            
-            return `
-                <div class="user-card role-${user.role}">
-                    <div class="user-card-header">
-                        <div class="user-card-avatar">${initials}</div>
-                        <div class="user-card-info">
-                            <h4>${user.full_name}</h4>
-                            <p class="email">${user.email}</p>
-                        </div>
-                    </div>
-                    <span class="user-card-role">${translateRole(user.role)}</span>
-                    <div class="user-card-actions">
-                        ${canEdit ? `<button class="btn btn-sm btn-secondary" onclick="showUserModal(${user.id})">Edytuj</button>` : ''}
-                        ${canDelete ? `<button class="btn btn-sm btn-danger" onclick="deleteUser(${user.id})">Usuń</button>` : ''}
-                    </div>
+        renderChatMessages();
+        renderChatUsers();
+        updateChatBadge();
+    } catch (error) {
+        console.error('Failed to load chat history:', error);
+    }
+}
+
+function renderChatMessages() {
+    const container = $('#chat-messages');
+    container.innerHTML = '';
+    
+    state.chatMessages.forEach(msg => {
+        const isOwn = msg.sender_id === state.user.id;
+        const isSystem = msg.message_type === 'system';
+        
+        const messageEl = document.createElement('div');
+        messageEl.className = `chat-message ${isOwn ? 'own' : 'other'} ${isSystem ? 'system' : ''}`;
+        
+        if (!isSystem) {
+            messageEl.innerHTML = `
+                <div class="message-header">
+                    <span class="message-sender">${escapeHtml(msg.sender_name)}</span>
+                    <span class="message-role">${getRoleLabel(msg.sender_role)}</span>
+                    <span class="message-time">${formatTime(msg.created_at)}</span>
                 </div>
+                <div class="message-content">${escapeHtml(msg.content)}</div>
             `;
-        }).join('');
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
-    }
-}
-
-async function showUserModal(userId = null) {
-    let user = null;
-    if (userId) {
-        const users = await api('/api/users');
-        user = users.find(u => u.id === userId);
-    }
-    
-    const canChangeRole = currentUser.role === 'owner';
-    
-    const modal = document.createElement('div');
-    modal.className = 'modal-overlay';
-    modal.innerHTML = `
-        <div class="modal">
-            <div class="modal-header">
-                <h2>${user ? 'Edytuj użytkownika' : 'Nowy użytkownik'}</h2>
-                <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
-            </div>
-            <div class="modal-body">
-                <form id="userForm">
-                    <div class="form-group">
-                        <label>Imię i nazwisko *</label>
-                        <input type="text" name="full_name" value="${user?.full_name || ''}" required>
-                    </div>
-                    <div class="form-group">
-                        <label>Email *</label>
-                        <input type="email" name="email" value="${user?.email || ''}" required>
-                    </div>
-                    <div class="form-group">
-                        <label>${user ? 'Nowe hasło (opcjonalne)' : 'Hasło *'}</label>
-                        <input type="password" name="password" ${user ? '' : 'required'} placeholder="${user ? 'Zostaw puste aby nie zmieniać' : ''}">
-                    </div>
-                    <div class="form-group">
-                        <label>Rola</label>
-                        <select name="role" ${!canChangeRole ? 'disabled' : ''}>
-                            ${currentUser.role === 'owner' ? '<option value="owner">Właściciel</option>' : ''}
-                            ${currentUser.role === 'owner' ? '<option value="manager">Menedżer</option>' : ''}
-                            <option value="worker" ${user?.role === 'worker' ? 'selected' : ''}>Pracownik</option>
-                        </select>
-                    </div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="this.closest('.modal-overlay').remove()">Anuluj</button>
-                <button class="btn btn-primary" onclick="saveUser(${userId})">Zapisz</button>
-            </div>
-        </div>
-    `;
-    
-    document.body.appendChild(modal);
-    
-    // Set role value
-    if (user) {
-        modal.querySelector('select[name="role"]').value = user.role;
-    }
-}
-
-async function saveUser(userId) {
-    const form = document.getElementById('userForm');
-    const formData = new FormData(form);
-    
-    const data = {
-        full_name: formData.get('full_name'),
-        email: formData.get('email'),
-        role: formData.get('role') || 'worker'
-    };
-    
-    if (formData.get('password')) {
-        data.password = formData.get('password');
-    }
-    
-    try {
-        if (userId) {
-            await api(`/api/users/${userId}`, {
-                method: 'PUT',
-                body: JSON.stringify(data)
-            });
-            showToast('Sukces', 'Użytkownik zaktualizowany', 'success');
         } else {
-            await api('/api/users', {
-                method: 'POST',
-                body: JSON.stringify(data)
-            });
-            showToast('Sukces', 'Użytkownik utworzony', 'success');
+            messageEl.innerHTML = `<div class="message-content">${escapeHtml(msg.content)}</div>`;
         }
         
-        document.querySelector('.modal-overlay').remove();
-        loadUsers();
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
-    }
-}
-
-async function deleteUser(userId) {
-    if (!confirm('Czy na pewno chcesz usunąć tego użytkownika?')) return;
+        container.appendChild(messageEl);
+    });
     
-    try {
-        await api(`/api/users/${userId}`, { method: 'DELETE' });
-        showToast('Sukces', 'Użytkownik usunięty', 'success');
-        loadUsers();
-    } catch (error) {
-        showToast('Błąd', error.message, 'error');
+    // Scroll to bottom
+    container.scrollTop = container.scrollHeight;
+}
+
+function addChatMessage(msg) {
+    state.chatMessages.push(msg);
+    
+    const container = $('#chat-messages');
+    const isOwn = msg.sender_id === state.user.id;
+    const isSystem = msg.message_type === 'system';
+    
+    const messageEl = document.createElement('div');
+    messageEl.className = `chat-message ${isOwn ? 'own' : 'other'} ${isSystem ? 'system' : ''}`;
+    
+    if (!isSystem) {
+        messageEl.innerHTML = `
+            <div class="message-header">
+                <span class="message-sender">${escapeHtml(msg.sender_name)}</span>
+                <span class="message-role">${getRoleLabel(msg.sender_role)}</span>
+                <span class="message-time">${formatTime(msg.created_at)}</span>
+            </div>
+            <div class="message-content">${escapeHtml(msg.content)}</div>
+        `;
+    } else {
+        messageEl.innerHTML = `<div class="message-content">${escapeHtml(msg.content)}</div>`;
+    }
+    
+    container.appendChild(messageEl);
+    container.scrollTop = container.scrollHeight;
+}
+
+function renderChatUsers() {
+    const container = $('#users-online');
+    container.innerHTML = '';
+    
+    const onlineUsers = state.chatUsers.filter(u => u.is_online);
+    const offlineUsers = state.chatUsers.filter(u => !u.is_online);
+    
+    $('#online-count').textContent = onlineUsers.length;
+    
+    [...onlineUsers, ...offlineUsers].forEach(user => {
+        const chip = document.createElement('div');
+        chip.className = `user-chip ${user.role}`;
+        chip.innerHTML = `
+            <span class="status-dot ${user.is_online ? 'online' : ''}"></span>
+            <span>${escapeHtml(user.full_name)}</span>
+        `;
+        container.appendChild(chip);
+    });
+}
+
+function updateUserStatus(userId, isOnline, fullName) {
+    const user = state.chatUsers.find(u => u.user_id === userId);
+    if (user) {
+        user.is_online = isOnline;
+    } else {
+        state.chatUsers.push({
+            user_id: userId,
+            full_name: fullName,
+            is_online: isOnline
+        });
+    }
+    renderChatUsers();
+}
+
+function updateChatBadge() {
+    const badge = $('#chat-badge');
+    if (state.unreadCount > 0) {
+        badge.textContent = state.unreadCount > 99 ? '99+' : state.unreadCount;
+        badge.classList.remove('hidden');
+    } else {
+        badge.classList.add('hidden');
     }
 }
 
-// ============== UTILITIES ==============
-function formatCurrency(amount) {
+async function markMessagesRead() {
+    if (state.unreadCount > 0) {
+        try {
+            await api('/api/chat/mark-read', { method: 'POST' });
+            state.unreadCount = 0;
+            updateChatBadge();
+        } catch (error) {
+            console.error('Failed to mark messages as read:', error);
+        }
+    }
+}
+
+function startChatPolling() {
+    // Fallback polling if WebSocket fails
+    setInterval(async () => {
+        if (!$('#chat-panel').classList.contains('active')) return;
+        await loadChatHistory();
+    }, 5000);
+}
+
+// Keep-alive ping
+setInterval(() => {
+    if (state.ws?.readyState === WebSocket.OPEN) {
+        state.ws.send(JSON.stringify({ type: 'ping' }));
+    }
+}, 30000);
+
+// ==================== UI HELPERS ====================
+
+function showLogin() {
+    $('#login-screen').classList.add('active');
+    $('#main-app').classList.remove('active');
+}
+
+function showApp() {
+    $('#login-screen').classList.remove('active');
+    $('#main-app').classList.add('active');
+    
+    $('#user-name').textContent = state.user.full_name;
+    $('#user-role-badge').textContent = getRoleLabel(state.user.role);
+    
+    // Show admin menu for owner/manager
+    if (['owner', 'manager'].includes(state.user.role)) {
+        $('#users-nav').classList.remove('hidden');
+    }
+    
+    loadInitialData();
+}
+
+function getRoleLabel(role) {
+    const labels = {
+        owner: 'Właściciel',
+        manager: 'Manager',
+        worker: 'Pracownik'
+    };
+    return labels[role] || role;
+}
+
+function formatMoney(amount) {
     return new Intl.NumberFormat('pl-PL', {
         style: 'currency',
         currency: 'PLN'
-    }).format(amount || 0);
+    }).format(amount);
 }
 
 function formatDate(dateStr) {
-    return new Date(dateStr).toLocaleDateString('pl-PL');
+    return new Date(dateStr).toLocaleDateString('pl-PL', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+    });
 }
 
 function formatTime(dateStr) {
@@ -2084,43 +450,14 @@ function formatTime(dateStr) {
     });
 }
 
-function formatDateTimeLocal(dateStr) {
-    const d = new Date(dateStr);
-    return d.toISOString().slice(0, 16);
-}
-
-function getMonthName(month) {
-    return ['Styczeń', 'Luty', 'Marzec', 'Kwiecień', 'Maj', 'Czerwiec',
-            'Lipiec', 'Sierpień', 'Wrzesień', 'Październik', 'Listopad', 'Grudzień'][month];
-}
-
-function getMonthShort(month) {
-    return ['Sty', 'Lut', 'Mar', 'Kwi', 'Maj', 'Cze', 
-            'Lip', 'Sie', 'Wrz', 'Paź', 'Lis', 'Gru'][month];
-}
-
-function translateRole(role) {
-    const roles = {
-        'owner': 'Właściciel',
-        'manager': 'Menedżer',
-        'worker': 'Pracownik'
-    };
-    return roles[role] || role;
-}
-
-function translateCategory(category) {
-    const categories = {
-        'tickets': 'Bilety',
-        'bar': 'Bar',
-        'merchandise': 'Merch',
-        'artist_fee': 'Honorarium artysty',
-        'staff': 'Personel',
-        'bar_stock': 'Zaopatrzenie baru',
-        'equipment': 'Sprzęt',
-        'marketing': 'Marketing',
-        'other': 'Inne'
-    };
-    return categories[category] || category;
+function formatDateTime(dateStr) {
+    return new Date(dateStr).toLocaleString('pl-PL', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+    });
 }
 
 function escapeHtml(text) {
@@ -2129,34 +466,1333 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-function showToast(title, message, type = 'info') {
-    const container = document.getElementById('toastContainer');
-    if (!container) return;
-    
-    const icons = {
-        success: '✅',
-        error: '❌',
-        warning: '⚠️',
-        info: 'ℹ️'
-    };
-    
+function toast(message, type = 'info') {
+    const container = $('#toast-container');
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
-    toast.innerHTML = `
-        <span class="toast-icon">${icons[type]}</span>
-        <div class="toast-content">
-            <div class="toast-title">${title}</div>
-            <div class="toast-message">${message}</div>
-        </div>
-        <button class="toast-close" onclick="this.parentElement.remove()">×</button>
-    `;
-    
+    toast.textContent = message;
     container.appendChild(toast);
     
-    setTimeout(() => toast.remove(), 5000);
+    setTimeout(() => {
+        toast.style.opacity = '0';
+        setTimeout(() => toast.remove(), 300);
+    }, 4000);
 }
 
-// ============== INITIALIZATION ==============
+// ==================== MODAL ====================
+
+function showModal(title, content) {
+    $('#modal-title').textContent = title;
+    $('#modal-body').innerHTML = content;
+    $('#modal').classList.add('active');
+}
+
+function hideModal() {
+    $('#modal').classList.remove('active');
+}
+
+// ==================== DATA LOADING ====================
+
+async function loadInitialData() {
+    try {
+        await Promise.all([
+            loadEvents(),
+            loadCategories()
+        ]);
+        updateDashboard();
+    } catch (error) {
+        console.error('Failed to load initial data:', error);
+    }
+}
+
+async function loadEvents() {
+    state.events = await api('/api/events');
+    updateEventSelects();
+}
+
+async function loadCategories() {
+    state.categories = await api('/api/stats/categories');
+}
+
+async function loadUsers() {
+    if (['owner', 'manager'].includes(state.user.role)) {
+        state.users = await api('/api/users');
+    }
+}
+
+function updateEventSelects() {
+    const selects = ['#cost-event-filter', '#revenue-event-filter', '#report-event-select'];
+    const options = state.events.map(e => 
+        `<option value="${e.id}">${escapeHtml(e.name)} (${formatDate(e.event_date)})</option>`
+    ).join('');
+    
+    selects.forEach(sel => {
+        const select = $(sel);
+        if (select) {
+            const firstOption = select.querySelector('option:first-child');
+            select.innerHTML = '';
+            if (firstOption) select.appendChild(firstOption);
+            select.innerHTML += options;
+        }
+    });
+}
+
+// ==================== DASHBOARD ====================
+
+async function updateDashboard() {
+    const totalEvents = state.events.length;
+    let totalCosts = 0;
+    let totalRevenue = 0;
+    
+    // Calculate totals from all events
+    for (const event of state.events) {
+        try {
+            const costs = await api(`/api/costs/event/${event.id}`);
+            const revenues = await api(`/api/revenue/event/${event.id}`);
+            totalCosts += costs.reduce((sum, c) => sum + c.amount, 0);
+            totalRevenue += revenues.reduce((sum, r) => sum + r.amount, 0);
+        } catch (e) {
+            // Skip failed requests
+        }
+    }
+    
+    $('#total-events').textContent = totalEvents;
+    $('#total-costs').textContent = formatMoney(totalCosts);
+    $('#total-revenue').textContent = formatMoney(totalRevenue);
+    $('#total-profit').textContent = formatMoney(totalRevenue - totalCosts);
+    
+    // Recent events
+    const recentEvents = state.events.slice(0, 5);
+    $('#recent-events').innerHTML = recentEvents.length ? recentEvents.map(e => `
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">🎪 ${escapeHtml(e.name)}</div>
+                    <div class="card-subtitle">${formatDate(e.event_date)}</div>
+                </div>
+                <span class="card-tag">${e.venue_capacity} miejsc</span>
+            </div>
+        </div>
+    `).join('') : '<p class="text-center" style="color: var(--text-muted)">Brak wydarzeń</p>';
+}
+
+// ==================== EVENTS ====================
+
+function renderEvents() {
+    const list = $('#events-list');
+    
+    if (!state.events.length) {
+        list.innerHTML = '<p class="text-center" style="color: var(--text-muted)">Brak wydarzeń</p>';
+        return;
+    }
+    
+    list.innerHTML = state.events.map(e => `
+        <div class="card">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">🎪 ${escapeHtml(e.name)}</div>
+                    <div class="card-subtitle">${formatDateTime(e.event_date)}</div>
+                </div>
+                <span class="card-tag">${e.venue_capacity} miejsc</span>
+            </div>
+            <div class="card-body">
+                ${e.description ? escapeHtml(e.description) : 'Brak opisu'}
+            </div>
+            <div class="card-footer">
+                <span class="card-amount">${formatMoney(e.ticket_price)} / bilet</span>
+                <div class="card-actions">
+                    <button class="btn btn-small btn-secondary" onclick="editEvent(${e.id})">✏️</button>
+                    <button class="btn btn-small btn-danger" onclick="deleteEvent(${e.id})">🗑️</button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function showEventForm(event = null) {
+    const isEdit = !!event;
+    const html = `
+        <form id="event-form">
+            <div class="form-group">
+                <label>Nazwa wydarzenia *</label>
+                <input type="text" name="name" value="${event?.name || ''}" required>
+            </div>
+            <div class="form-group">
+                <label>Data wydarzenia *</label>
+                <input type="datetime-local" name="event_date" value="${event ? new Date(event.event_date).toISOString().slice(0, 16) : ''}" required>
+            </div>
+            <div class="form-group">
+                <label>Pojemność</label>
+                <input type="number" name="venue_capacity" value="${event?.venue_capacity || 0}" min="0">
+            </div>
+            <div class="form-group">
+                <label>Cena biletu (PLN)</label>
+                <input type="number" name="ticket_price" value="${event?.ticket_price || 0}" min="0" step="0.01">
+            </div>
+            <div class="form-group">
+                <label>Opis</label>
+                <textarea name="description">${event?.description || ''}</textarea>
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
+                <button type="submit" class="btn btn-primary">${isEdit ? 'Zapisz' : 'Dodaj'}</button>
+            </div>
+        </form>
+    `;
+    
+    showModal(isEdit ? 'Edytuj wydarzenie' : 'Nowe wydarzenie', html);
+    
+    $('#event-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = {
+            name: formData.get('name'),
+            event_date: new Date(formData.get('event_date')).toISOString(),
+            venue_capacity: parseInt(formData.get('venue_capacity')) || 0,
+            ticket_price: parseFloat(formData.get('ticket_price')) || 0,
+            description: formData.get('description')
+        };
+        
+        try {
+            if (isEdit) {
+                await api(`/api/events/${event.id}`, { method: 'PUT', body: JSON.stringify(data) });
+                toast('Wydarzenie zaktualizowane', 'success');
+            } else {
+                await api('/api/events', { method: 'POST', body: JSON.stringify(data) });
+                toast('Wydarzenie dodane', 'success');
+            }
+            hideModal();
+            await loadEvents();
+            renderEvents();
+            updateDashboard();
+        } catch (error) {
+            toast(error.message, 'error');
+        }
+    };
+}
+
+function editEvent(id) {
+    const event = state.events.find(e => e.id === id);
+    if (event) showEventForm(event);
+}
+
+async function deleteEvent(id) {
+    if (!confirm('Czy na pewno chcesz usunąć to wydarzenie?')) return;
+    
+    try {
+        await api(`/api/events/${id}`, { method: 'DELETE' });
+        toast('Wydarzenie usunięte', 'success');
+        await loadEvents();
+        renderEvents();
+        updateDashboard();
+    } catch (error) {
+        toast(error.message, 'error');
+    }
+}
+
+// ==================== COSTS ====================
+
+async function loadCosts(eventId = null) {
+    if (eventId) {
+        state.costs = await api(`/api/costs/event/${eventId}`);
+    } else {
+        state.costs = [];
+        for (const event of state.events) {
+            const costs = await api(`/api/costs/event/${event.id}`);
+            state.costs.push(...costs.map(c => ({ ...c, eventName: event.name })));
+        }
+    }
+    renderCosts();
+}
+
+function renderCosts() {
+    const list = $('#costs-list');
+    
+    if (!state.costs.length) {
+        list.innerHTML = '<p class="text-center" style="color: var(--text-muted)">Brak kosztów</p>';
+        return;
+    }
+    
+    list.innerHTML = state.costs.map(c => {
+        const categoryLabel = state.categories?.cost_categories?.[c.category] || c.category;
+        const event = state.events.find(e => e.id === c.event_id);
+        return `
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">${categoryLabel}</div>
+                        <div class="card-subtitle">${event ? escapeHtml(event.name) : 'Wydarzenie #' + c.event_id}</div>
+                    </div>
+                    <span class="card-tag">${formatDate(c.created_at)}</span>
+                </div>
+                <div class="card-body">${c.description ? escapeHtml(c.description) : 'Brak opisu'}</div>
+                <div class="card-footer">
+                    <span class="card-amount negative">-${formatMoney(c.amount)}</span>
+                    <div class="card-actions">
+                        <button class="btn btn-small btn-secondary" onclick="editCost(${c.id})">✏️</button>
+                        <button class="btn btn-small btn-danger" onclick="deleteCost(${c.id})">🗑️</button>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function showCostForm(cost = null) {
+    const isEdit = !!cost;
+    const categories = state.categories?.cost_categories || {};
+    const categoryOptions = Object.entries(categories).map(([key, label]) => 
+        `<option value="${key}" ${cost?.category === key ? 'selected' : ''}>${label}</option>`
+    ).join('');
+    
+    const eventOptions = state.events.map(e => 
+        `<option value="${e.id}" ${cost?.event_id === e.id ? 'selected' : ''}>${escapeHtml(e.name)}</option>`
+    ).join('');
+    
+    const html = `
+        <form id="cost-form">
+            <div class="form-group">
+                <label>Wydarzenie *</label>
+                <select name="event_id" required class="form-select">${eventOptions}</select>
+            </div>
+            <div class="form-group">
+                <label>Kategoria *</label>
+                <select name="category" required class="form-select">${categoryOptions}</select>
+            </div>
+            <div class="form-group">
+                <label>Kwota (PLN) *</label>
+                <input type="number" name="amount" value="${cost?.amount || ''}" min="0.01" step="0.01" required>
+            </div>
+            <div class="form-group">
+                <label>Opis</label>
+                <textarea name="description">${cost?.description || ''}</textarea>
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
+                <button type="submit" class="btn btn-primary">${isEdit ? 'Zapisz' : 'Dodaj'}</button>
+            </div>
+        </form>
+    `;
+    
+    showModal(isEdit ? 'Edytuj koszt' : 'Nowy koszt', html);
+    
+    $('#cost-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = {
+            event_id: parseInt(formData.get('event_id')),
+            category: formData.get('category'),
+            amount: parseFloat(formData.get('amount')),
+            description: formData.get('description')
+        };
+        
+        try {
+            if (isEdit) {
+                await api(`/api/costs/${cost.id}`, { method: 'PUT', body: JSON.stringify(data) });
+                toast('Koszt zaktualizowany', 'success');
+            } else {
+                await api('/api/costs', { method: 'POST', body: JSON.stringify(data) });
+                toast('Koszt dodany', 'success');
+            }
+            hideModal();
+            await loadCosts($('#cost-event-filter').value || null);
+            updateDashboard();
+        } catch (error) {
+            toast(error.message, 'error');
+        }
+    };
+}
+
+function editCost(id) {
+    const cost = state.costs.find(c => c.id === id);
+    if (cost) showCostForm(cost);
+}
+
+async function deleteCost(id) {
+    if (!confirm('Czy na pewno chcesz usunąć ten koszt?')) return;
+    
+    try {
+        await api(`/api/costs/${id}`, { method: 'DELETE' });
+        toast('Koszt usunięty', 'success');
+        await loadCosts($('#cost-event-filter').value || null);
+        updateDashboard();
+    } catch (error) {
+        toast(error.message, 'error');
+    }
+}
+
+// ==================== REVENUE ====================
+
+async function loadRevenue(eventId = null) {
+    if (eventId) {
+        state.revenues = await api(`/api/revenue/event/${eventId}`);
+    } else {
+        state.revenues = [];
+        for (const event of state.events) {
+            const revenues = await api(`/api/revenue/event/${event.id}`);
+            state.revenues.push(...revenues.map(r => ({ ...r, eventName: event.name })));
+        }
+    }
+    renderRevenue();
+}
+
+function renderRevenue() {
+    const list = $('#revenue-list');
+    
+    if (!state.revenues.length) {
+        list.innerHTML = '<p class="text-center" style="color: var(--text-muted)">Brak przychodów</p>';
+        return;
+    }
+    
+    list.innerHTML = state.revenues.map(r => {
+        const sourceLabel = state.categories?.revenue_sources?.[r.source] || r.source;
+        const event = state.events.find(e => e.id === r.event_id);
+        return `
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">${sourceLabel}</div>
+                        <div class="card-subtitle">${event ? escapeHtml(event.name) : 'Wydarzenie #' + r.event_id}</div>
+                    </div>
+                    <span class="card-tag">${formatDate(r.created_at)}</span>
+                </div>
+                <div class="card-body">${r.description ? escapeHtml(r.description) : 'Brak opisu'}</div>
+                <div class="card-footer">
+                    <span class="card-amount positive">+${formatMoney(r.amount)}</span>
+                    <div class="card-actions">
+                        <button class="btn btn-small btn-secondary" onclick="editRevenue(${r.id})">✏️</button>
+                        <button class="btn btn-small btn-danger" onclick="deleteRevenue(${r.id})">🗑️</button>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function showRevenueForm(revenue = null) {
+    const isEdit = !!revenue;
+    const sources = state.categories?.revenue_sources || {};
+    const sourceOptions = Object.entries(sources).map(([key, label]) => 
+        `<option value="${key}" ${revenue?.source === key ? 'selected' : ''}>${label}</option>`
+    ).join('');
+    
+    const eventOptions = state.events.map(e => 
+        `<option value="${e.id}" ${revenue?.event_id === e.id ? 'selected' : ''}>${escapeHtml(e.name)}</option>`
+    ).join('');
+    
+    const html = `
+        <form id="revenue-form">
+            <div class="form-group">
+                <label>Wydarzenie *</label>
+                <select name="event_id" required class="form-select">${eventOptions}</select>
+            </div>
+            <div class="form-group">
+                <label>Źródło *</label>
+                <select name="source" required class="form-select">${sourceOptions}</select>
+            </div>
+            <div class="form-group">
+                <label>Kwota (PLN) *</label>
+                <input type="number" name="amount" value="${revenue?.amount || ''}" min="0.01" step="0.01" required>
+            </div>
+            <div class="form-group">
+                <label>Opis</label>
+                <textarea name="description">${revenue?.description || ''}</textarea>
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
+                <button type="submit" class="btn btn-primary">${isEdit ? 'Zapisz' : 'Dodaj'}</button>
+            </div>
+        </form>
+    `;
+    
+    showModal(isEdit ? 'Edytuj przychód' : 'Nowy przychód', html);
+    
+    $('#revenue-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = {
+            event_id: parseInt(formData.get('event_id')),
+            source: formData.get('source'),
+            amount: parseFloat(formData.get('amount')),
+            description: formData.get('description')
+        };
+        
+        try {
+            if (isEdit) {
+                await api(`/api/revenue/${revenue.id}`, { method: 'PUT', body: JSON.stringify(data) });
+                toast('Przychód zaktualizowany', 'success');
+            } else {
+                await api('/api/revenue', { method: 'POST', body: JSON.stringify(data) });
+                toast('Przychód dodany', 'success');
+            }
+            hideModal();
+            await loadRevenue($('#revenue-event-filter').value || null);
+            updateDashboard();
+        } catch (error) {
+            toast(error.message, 'error');
+        }
+    };
+}
+
+function editRevenue(id) {
+    const revenue = state.revenues.find(r => r.id === id);
+    if (revenue) showRevenueForm(revenue);
+}
+
+async function deleteRevenue(id) {
+    if (!confirm('Czy na pewno chcesz usunąć ten przychód?')) return;
+    
+    try {
+        await api(`/api/revenue/${id}`, { method: 'DELETE' });
+        toast('Przychód usunięty', 'success');
+        await loadRevenue($('#revenue-event-filter').value || null);
+        updateDashboard();
+    } catch (error) {
+        toast(error.message, 'error');
+    }
+}
+
+// ==================== RECEIPTS ====================
+
+async function loadReceipts() {
+    state.receipts = await api('/api/receipts');
+    renderReceipts();
+}
+
+function renderReceipts() {
+    const list = $('#receipts-list');
+    const canViewImages = ['owner', 'manager'].includes(state.user?.role);
+    
+    if (!state.receipts.length) {
+        list.innerHTML = '<p class="text-center" style="color: var(--text-muted)">Brak paragonów. Dodaj pierwszy paragon klikając przycisk powyżej.</p>';
+        return;
+    }
+    
+    list.innerHTML = state.receipts.map(r => `
+        <div class="card receipt-card ${r.status}">
+            <div class="card-header">
+                <div>
+                    <div class="card-title">
+                        ${r.has_image ? '📷' : '🧾'} ${escapeHtml(r.store_name || 'Nieznany sklep')}
+                    </div>
+                    <div class="card-subtitle">
+                        ${r.receipt_date ? formatDate(r.receipt_date) : 'Brak daty'}
+                        ${r.uploaded_by_name ? ` • Dodał: ${escapeHtml(r.uploaded_by_name)}` : ''}
+                    </div>
+                </div>
+                <span class="card-tag ${r.status === 'processed' ? 'status-processed' : 'status-pending'}">
+                    ${r.status === 'processed' ? '✓ Przetworzony' : '⏳ Oczekuje'}
+                </span>
+            </div>
+            <div class="card-footer">
+                <span class="card-amount">${r.total_amount ? formatMoney(r.total_amount) : 'Brak kwoty'}</span>
+                <div class="card-actions">
+                    <button class="btn btn-small" onclick="showReceiptDetails(${r.id})">👁️ Szczegóły</button>
+                    ${r.has_image && canViewImages ? `<button class="btn btn-small" onclick="showReceiptImage(${r.id})">🖼️ Zdjęcie</button>` : ''}
+                    ${r.status === 'pending' ? `<button class="btn btn-small btn-primary" onclick="createCostFromReceipt(${r.id})">💰 Utwórz koszt</button>` : ''}
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function showReceiptForm() {
+    const html = `
+        <div class="receipt-upload-tabs">
+            <button type="button" class="tab-btn active" onclick="switchReceiptTab('image')">📷 Zdjęcie paragonu</button>
+            <button type="button" class="tab-btn" onclick="switchReceiptTab('text')">📝 Tekst (ręcznie)</button>
+        </div>
+        
+        <div id="receipt-tab-image" class="receipt-tab active">
+            <form id="receipt-image-form">
+                <div class="form-group">
+                    <label>Wybierz zdjęcie paragonu *</label>
+                    <div class="file-upload-area" id="file-upload-area">
+                        <input type="file" name="receipt_image" id="receipt-image-input" accept="image/jpeg,image/png,image/webp" required hidden>
+                        <div class="upload-placeholder" onclick="$('#receipt-image-input').click()">
+                            <span class="upload-icon">📷</span>
+                            <span>Kliknij aby wybrać zdjęcie</span>
+                            <span class="upload-hint">lub przeciągnij i upuść</span>
+                        </div>
+                        <div class="upload-preview" id="upload-preview" style="display: none;">
+                            <img id="preview-image" src="" alt="Podgląd">
+                            <button type="button" class="btn btn-small" onclick="clearImagePreview()">✕ Usuń</button>
+                        </div>
+                    </div>
+                    <span class="form-hint">Obsługiwane formaty: JPEG, PNG, WebP. Maks. 5MB.</span>
+                </div>
+                <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 16px; background: var(--bg-tertiary); padding: 12px; border-radius: 8px;">
+                    💡 <strong>Wskazówka:</strong> Zrób wyraźne zdjęcie paragonu telefonem. System automatycznie rozpozna sklep, kwotę i datę.
+                </p>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
+                    <button type="submit" class="btn btn-primary" id="upload-image-btn">📤 Prześlij zdjęcie</button>
+                </div>
+            </form>
+        </div>
+        
+        <div id="receipt-tab-text" class="receipt-tab" style="display: none;">
+            <form id="receipt-text-form">
+                <div class="form-group">
+                    <label>Tekst paragonu (OCR) *</label>
+                    <textarea name="ocr_text" rows="8" placeholder="Wklej tekst zeskanowany z paragonu (np. Google Lens)..." required></textarea>
+                </div>
+                <p style="color: var(--text-muted); font-size: 12px; margin-bottom: 16px;">
+                    💡 Użyj Google Lens lub podobnej aplikacji do zeskanowania paragonu, a następnie wklej tekst powyżej.
+                </p>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
+                    <button type="submit" class="btn btn-primary">📤 Prześlij</button>
+                </div>
+            </form>
+        </div>
+    `;
+    
+    showModal('Dodaj paragon', html);
+    
+    // Setup file input handlers
+    const fileInput = $('#receipt-image-input');
+    const uploadArea = $('#file-upload-area');
+    
+    fileInput.addEventListener('change', handleImageSelect);
+    
+    // Drag and drop
+    uploadArea.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        uploadArea.classList.add('dragover');
+    });
+    
+    uploadArea.addEventListener('dragleave', () => {
+        uploadArea.classList.remove('dragover');
+    });
+    
+    uploadArea.addEventListener('drop', (e) => {
+        e.preventDefault();
+        uploadArea.classList.remove('dragover');
+        if (e.dataTransfer.files.length) {
+            fileInput.files = e.dataTransfer.files;
+            handleImageSelect({ target: fileInput });
+        }
+    });
+    
+    // Image upload form
+    $('#receipt-image-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const file = fileInput.files[0];
+        if (!file) {
+            toast('Wybierz zdjęcie paragonu', 'error');
+            return;
+        }
+        
+        const btn = $('#upload-image-btn');
+        btn.disabled = true;
+        btn.innerHTML = '⏳ Przetwarzanie OCR...';
+        
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            const response = await fetch(`${API_URL}/api/receipts/upload-image`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${state.token}`
+                },
+                body: formData
+            });
+            
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.detail || 'Błąd przesyłania');
+            }
+            
+            const result = await response.json();
+            
+            let message = 'Paragon dodany!';
+            if (result.store_name) message += ` Sklep: ${result.store_name}`;
+            if (result.total_amount) message += ` | Kwota: ${formatMoney(result.total_amount)}`;
+            
+            toast(message, 'success');
+            hideModal();
+            await loadReceipts();
+        } catch (error) {
+            toast(error.message, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '📤 Prześlij zdjęcie';
+        }
+    };
+    
+    // Text upload form (legacy)
+    $('#receipt-text-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        
+        try {
+            const result = await api('/api/receipts/upload', {
+                method: 'POST',
+                body: JSON.stringify({ ocr_text: formData.get('ocr_text') })
+            });
+            
+            toast(`Paragon dodany! Rozpoznano sklep: ${result.store_name || 'Nieznany'}`, 'success');
+            hideModal();
+            await loadReceipts();
+        } catch (error) {
+            toast(error.message, 'error');
+        }
+    };
+}
+
+function switchReceiptTab(tab) {
+    document.querySelectorAll('.receipt-upload-tabs .tab-btn').forEach(btn => btn.classList.remove('active'));
+    document.querySelectorAll('.receipt-tab').forEach(t => t.style.display = 'none');
+    
+    event.target.classList.add('active');
+    $(`#receipt-tab-${tab}`).style.display = 'block';
+}
+
+function handleImageSelect(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    // Validate
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+        toast('Nieprawidłowy format. Użyj JPEG, PNG lub WebP.', 'error');
+        return;
+    }
+    
+    if (file.size > 5 * 1024 * 1024) {
+        toast('Plik jest za duży (max 5MB)', 'error');
+        return;
+    }
+    
+    // Show preview
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        $('#preview-image').src = e.target.result;
+        $('.upload-placeholder').style.display = 'none';
+        $('#upload-preview').style.display = 'flex';
+    };
+    reader.readAsDataURL(file);
+}
+
+function clearImagePreview() {
+    $('#receipt-image-input').value = '';
+    $('#preview-image').src = '';
+    $('.upload-placeholder').style.display = 'flex';
+    $('#upload-preview').style.display = 'none';
+}
+
+async function showReceiptDetails(receiptId) {
+    try {
+        const receipt = await api(`/api/receipts/${receiptId}`);
+        
+        const itemsHtml = receipt.parsed_items?.length ? `
+            <div class="receipt-items">
+                <h4>Rozpoznane pozycje:</h4>
+                <ul>
+                    ${receipt.parsed_items.map(item => `
+                        <li>${escapeHtml(item.name)} - ${formatMoney(item.price)}</li>
+                    `).join('')}
+                </ul>
+            </div>
+        ` : '';
+        
+        const html = `
+            <div class="receipt-details">
+                <div class="detail-row">
+                    <span class="detail-label">Sklep:</span>
+                    <span class="detail-value">${escapeHtml(receipt.store_name || 'Nieznany')}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Data:</span>
+                    <span class="detail-value">${receipt.receipt_date ? formatDate(receipt.receipt_date) : 'Brak'}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Kwota:</span>
+                    <span class="detail-value" style="font-weight: 600; color: var(--primary);">
+                        ${receipt.total_amount ? formatMoney(receipt.total_amount) : 'Nie rozpoznano'}
+                    </span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Status:</span>
+                    <span class="detail-value">${receipt.status === 'processed' ? '✅ Przetworzony' : '⏳ Oczekuje'}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Dodał:</span>
+                    <span class="detail-value">${escapeHtml(receipt.uploaded_by_name || 'Nieznany')}</span>
+                </div>
+                <div class="detail-row">
+                    <span class="detail-label">Data dodania:</span>
+                    <span class="detail-value">${formatDate(receipt.created_at)}</span>
+                </div>
+                ${receipt.has_image ? '<div class="detail-row"><span class="detail-label">Zdjęcie:</span><span class="detail-value">📷 Załączone</span></div>' : ''}
+                ${itemsHtml}
+                ${receipt.ocr_text ? `
+                    <div class="ocr-text-section">
+                        <h4>Tekst OCR:</h4>
+                        <pre class="ocr-text">${escapeHtml(receipt.ocr_text)}</pre>
+                    </div>
+                ` : ''}
+            </div>
+            <div class="form-actions" style="margin-top: 20px;">
+                <button type="button" class="btn btn-secondary" onclick="hideModal()">Zamknij</button>
+                ${receipt.has_image && ['owner', 'manager'].includes(state.user?.role) ? `
+                    <button type="button" class="btn btn-primary" onclick="showReceiptImage(${receiptId})">🖼️ Zobacz zdjęcie</button>
+                ` : ''}
+            </div>
+        `;
+        
+        showModal('Szczegóły paragonu', html);
+    } catch (error) {
+        toast(error.message, 'error');
+    }
+}
+
+function showReceiptImage(receiptId) {
+    if (!['owner', 'manager'].includes(state.user?.role)) {
+        toast('Tylko manager i właściciel mogą przeglądać zdjęcia paragonów', 'error');
+        return;
+    }
+    
+    const imageUrl = `${API_URL}/api/receipts/${receiptId}/image?token=${state.token}`;
+    
+    const html = `
+        <div class="receipt-image-viewer">
+            <img src="${imageUrl}" alt="Zdjęcie paragonu" style="max-width: 100%; max-height: 70vh; border-radius: 8px;">
+        </div>
+        <div class="form-actions" style="margin-top: 20px;">
+            <button type="button" class="btn btn-secondary" onclick="hideModal()">Zamknij</button>
+            <a href="${imageUrl}" download="paragon_${receiptId}.jpg" class="btn btn-primary">📥 Pobierz</a>
+        </div>
+    `;
+    
+    showModal('Zdjęcie paragonu', html);
+}
+
+function createCostFromReceipt(receiptId) {
+    const receipt = state.receipts.find(r => r.id === receiptId);
+    if (!receipt) return;
+    
+    const eventOptions = state.events.map(e => 
+        `<option value="${e.id}">${escapeHtml(e.name)}</option>`
+    ).join('');
+    
+    const categories = state.categories?.cost_categories || {};
+    const categoryOptions = Object.entries(categories).map(([key, label]) => 
+        `<option value="${key}" ${key === 'bar_supplies' ? 'selected' : ''}>${label}</option>`
+    ).join('');
+    
+    const html = `
+        <form id="receipt-cost-form">
+            <div class="receipt-summary">
+                <div class="summary-item">
+                    <span class="summary-label">Sklep:</span>
+                    <span class="summary-value">${escapeHtml(receipt.store_name || 'Nieznany sklep')}</span>
+                </div>
+                <div class="summary-item">
+                    <span class="summary-label">Kwota:</span>
+                    <span class="summary-value amount">${receipt.total_amount ? formatMoney(receipt.total_amount) : 'Brak'}</span>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Wydarzenie *</label>
+                <select name="event_id" required class="form-select">${eventOptions}</select>
+            </div>
+            <div class="form-group">
+                <label>Kategoria *</label>
+                <select name="category" required class="form-select">${categoryOptions}</select>
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
+                <button type="submit" class="btn btn-primary">✅ Utwórz koszt</button>
+            </div>
+        </form>
+    `;
+    
+    showModal('Utwórz koszt z paragonu', html);
+    
+    $('#receipt-cost-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        
+        try {
+            await api(`/api/receipts/${receiptId}/create-costs`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    receipt_id: receiptId,
+                    event_id: parseInt(formData.get('event_id')),
+                    category: formData.get('category')
+                })
+            });
+            
+            toast('Koszt utworzony z paragonu!', 'success');
+            hideModal();
+            await loadReceipts();
+            updateDashboard();
+        } catch (error) {
+            toast(error.message, 'error');
+        }
+    };
+}
+
+// ==================== REPORTS ====================
+
+async function loadReport(eventId) {
+    if (!eventId) {
+        $('#report-content').innerHTML = '<p class="text-center" style="color: var(--text-muted)">Wybierz wydarzenie</p>';
+        return;
+    }
+    
+    try {
+        const report = await api(`/api/reports/event/${eventId}`);
+        
+        const costsBreakdown = Object.entries(report.costs_breakdown || {}).map(([cat, amount]) => {
+            const label = state.categories?.cost_categories?.[cat] || cat;
+            return `<div class="breakdown-item"><span>${label}</span><span class="text-danger">-${formatMoney(amount)}</span></div>`;
+        }).join('') || '<p style="color: var(--text-muted)">Brak kosztów</p>';
+        
+        const revenueBreakdown = Object.entries(report.revenue_breakdown || {}).map(([src, amount]) => {
+            const label = state.categories?.revenue_sources?.[src] || src;
+            return `<div class="breakdown-item"><span>${label}</span><span class="text-success">+${formatMoney(amount)}</span></div>`;
+        }).join('') || '<p style="color: var(--text-muted)">Brak przychodów</p>';
+        
+        $('#report-content').innerHTML = `
+            <h3 style="margin-bottom: 20px;">📊 ${escapeHtml(report.event_name)}</h3>
+            <div class="report-summary">
+                <div class="report-stat">
+                    <span class="report-stat-value text-danger">${formatMoney(report.total_costs)}</span>
+                    <span class="report-stat-label">Koszty</span>
+                </div>
+                <div class="report-stat">
+                    <span class="report-stat-value text-success">${formatMoney(report.total_revenue)}</span>
+                    <span class="report-stat-label">Przychody</span>
+                </div>
+                <div class="report-stat">
+                    <span class="report-stat-value ${report.net_profit >= 0 ? 'text-success' : 'text-danger'}">${formatMoney(report.net_profit)}</span>
+                    <span class="report-stat-label">Zysk netto</span>
+                </div>
+                <div class="report-stat">
+                    <span class="report-stat-value">${report.profit_margin.toFixed(1)}%</span>
+                    <span class="report-stat-label">Marża</span>
+                </div>
+            </div>
+            <div class="breakdown-section">
+                <h4>💸 Koszty</h4>
+                ${costsBreakdown}
+            </div>
+            <div class="breakdown-section">
+                <h4>💰 Przychody</h4>
+                ${revenueBreakdown}
+            </div>
+        `;
+    } catch (error) {
+        toast(error.message, 'error');
+    }
+}
+
+// ==================== USERS ====================
+
+function canManageUser(targetUser) {
+    // Nie można zarządzać sobą (z wyjątkiem edycji imienia)
+    if (targetUser.id === state.user.id) return false;
+    
+    // Właściciel może zarządzać wszystkimi
+    if (state.user.role === 'owner') return true;
+    
+    // Manager może zarządzać tylko pracownikami
+    if (state.user.role === 'manager' && targetUser.role === 'worker') return true;
+    
+    return false;
+}
+
+function renderUsers() {
+    const list = $('#users-list');
+    
+    if (!state.users.length) {
+        list.innerHTML = '<p class="text-center" style="color: var(--text-muted)">Brak użytkowników</p>';
+        return;
+    }
+    
+    // Sortuj: właściciele > managerzy > pracownicy, potem alfabetycznie
+    const roleOrder = { owner: 0, manager: 1, worker: 2 };
+    const sortedUsers = [...state.users].sort((a, b) => {
+        const roleCompare = roleOrder[a.role] - roleOrder[b.role];
+        if (roleCompare !== 0) return roleCompare;
+        return a.full_name.localeCompare(b.full_name, 'pl');
+    });
+    
+    list.innerHTML = sortedUsers.map(u => {
+        const canManage = canManageUser(u);
+        const isCurrentUser = u.id === state.user.id;
+        const roleClass = u.role === 'owner' ? 'owner' : (u.role === 'manager' ? 'manager' : 'worker');
+        const roleEmoji = u.role === 'owner' ? '👑' : (u.role === 'manager' ? '🎯' : '👤');
+        
+        return `
+            <div class="card user-card ${roleClass}" data-user-id="${u.id}">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">${roleEmoji} ${escapeHtml(u.full_name)} ${isCurrentUser ? '<span class="you-badge">(Ty)</span>' : ''}</div>
+                        <div class="card-subtitle">📧 ${escapeHtml(u.email)}</div>
+                    </div>
+                    <span class="card-tag role-${u.role}">${getRoleLabel(u.role)}</span>
+                </div>
+                <div class="card-body">
+                    <div class="user-details">
+                        <span class="${u.is_active ? 'status-active' : 'status-inactive'}">
+                            ${u.is_active ? '✅ Aktywny' : '❌ Nieaktywny'}
+                        </span>
+                        <span class="user-date">📅 Dołączył: ${formatDate(u.created_at)}</span>
+                    </div>
+                </div>
+                ${canManage ? `
+                <div class="card-footer">
+                    <div class="card-actions">
+                        <button class="btn btn-small btn-secondary" onclick="editUser(${u.id})" title="Edytuj użytkownika">
+                            ✏️ Edytuj
+                        </button>
+                        <button class="btn btn-small btn-danger" onclick="deleteUser(${u.id})" title="Usuń użytkownika">
+                            🗑️ Usuń
+                        </button>
+                    </div>
+                </div>
+                ` : ''}
+            </div>
+        `;
+    }).join('');
+}
+
+function addUser() {
+    const isOwner = state.user.role === 'owner';
+    
+    const html = `
+        <form id="user-form">
+            <div class="form-group">
+                <label>Imię i nazwisko *</label>
+                <input type="text" name="full_name" required placeholder="np. Jan Kowalski">
+            </div>
+            <div class="form-group">
+                <label>Adres email *</label>
+                <input type="email" name="email" required placeholder="np. jan@example.com">
+            </div>
+            <div class="form-group">
+                <label>Hasło *</label>
+                <input type="password" name="password" required minlength="6" placeholder="Minimum 6 znaków">
+            </div>
+            <div class="form-group">
+                <label>Rola</label>
+                <select name="role" class="form-select">
+                    <option value="worker">👤 Pracownik</option>
+                    ${isOwner ? `
+                    <option value="manager">🎯 Manager</option>
+                    <option value="owner">👑 Właściciel</option>
+                    ` : ''}
+                </select>
+                ${!isOwner ? '<small class="form-hint">Jako manager możesz dodawać tylko pracowników</small>' : ''}
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="is_active" checked>
+                    <span>Konto aktywne</span>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
+                <button type="submit" class="btn btn-primary">➕ Dodaj użytkownika</button>
+            </div>
+        </form>
+    `;
+    
+    showModal('Dodaj nowego użytkownika', html);
+    
+    $('#user-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const submitBtn = e.target.querySelector('button[type="submit"]');
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Dodawanie...';
+        
+        try {
+            await api('/api/users', {
+                method: 'POST',
+                body: JSON.stringify({
+                    full_name: formData.get('full_name').trim(),
+                    email: formData.get('email').trim().toLowerCase(),
+                    password: formData.get('password'),
+                    role: formData.get('role'),
+                    is_active: formData.has('is_active')
+                })
+            });
+            toast('✅ Użytkownik został dodany!', 'success');
+            hideModal();
+            await loadUsers();
+            renderUsers();
+        } catch (error) {
+            toast(error.message || 'Błąd podczas dodawania użytkownika', 'error');
+            submitBtn.disabled = false;
+            submitBtn.textContent = '➕ Dodaj użytkownika';
+        }
+    };
+}
+
+function editUser(id) {
+    const user = state.users.find(u => u.id === id);
+    if (!user) return;
+    
+    const isOwner = state.user.role === 'owner';
+    const canChangeRole = isOwner && user.id !== state.user.id;
+    
+    const html = `
+        <form id="user-form">
+            <div class="form-group">
+                <label>Imię i nazwisko *</label>
+                <input type="text" name="full_name" value="${escapeHtml(user.full_name)}" required>
+            </div>
+            <div class="form-group">
+                <label>Adres email *</label>
+                <input type="email" name="email" value="${escapeHtml(user.email)}" required>
+            </div>
+            <div class="form-group">
+                <label>Nowe hasło <small>(zostaw puste aby nie zmieniać)</small></label>
+                <input type="password" name="password" minlength="6" placeholder="Minimum 6 znaków">
+            </div>
+            <div class="form-group">
+                <label>Rola</label>
+                <select name="role" class="form-select" ${!canChangeRole ? 'disabled' : ''}>
+                    <option value="worker" ${user.role === 'worker' ? 'selected' : ''}>👤 Pracownik</option>
+                    ${isOwner ? `
+                    <option value="manager" ${user.role === 'manager' ? 'selected' : ''}>🎯 Manager</option>
+                    <option value="owner" ${user.role === 'owner' ? 'selected' : ''}>👑 Właściciel</option>
+                    ` : ''}
+                </select>
+                ${!canChangeRole ? '<small class="form-hint">Nie możesz zmienić tej roli</small>' : ''}
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="is_active" ${user.is_active ? 'checked' : ''}>
+                    <span>Konto aktywne</span>
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
+                <button type="submit" class="btn btn-primary">💾 Zapisz zmiany</button>
+            </div>
+        </form>
+    `;
+    
+    showModal(`Edytuj: ${user.full_name}`, html);
+    
+    $('#user-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const submitBtn = e.target.querySelector('button[type="submit"]');
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Zapisywanie...';
+        
+        const updateData = {
+            full_name: formData.get('full_name').trim(),
+            email: formData.get('email').trim().toLowerCase(),
+            is_active: formData.has('is_active')
+        };
+        
+        // Dodaj hasło tylko jeśli podane
+        const password = formData.get('password');
+        if (password && password.length > 0) {
+            updateData.password = password;
+        }
+        
+        // Dodaj rolę tylko jeśli można ją zmienić
+        if (canChangeRole) {
+            updateData.role = formData.get('role');
+        }
+        
+        try {
+            await api(`/api/users/${user.id}`, {
+                method: 'PUT',
+                body: JSON.stringify(updateData)
+            });
+            toast('✅ Użytkownik zaktualizowany!', 'success');
+            hideModal();
+            await loadUsers();
+            renderUsers();
+        } catch (error) {
+            toast(error.message || 'Błąd podczas aktualizacji', 'error');
+            submitBtn.disabled = false;
+            submitBtn.textContent = '💾 Zapisz zmiany';
+        }
+    };
+}
+
+async function deleteUser(id) {
+    const user = state.users.find(u => u.id === id);
+    if (!user) return;
+    
+    const confirmMsg = `⚠️ Czy na pewno chcesz usunąć użytkownika?\n\n` +
+                      `Imię: ${user.full_name}\n` +
+                      `Email: ${user.email}\n` +
+                      `Rola: ${getRoleLabel(user.role)}\n\n` +
+                      `Ta operacja jest nieodwracalna!`;
+    
+    if (!confirm(confirmMsg)) return;
+    
+    try {
+        const result = await api(`/api/users/${id}`, { method: 'DELETE' });
+        toast(`✅ ${result.message || 'Użytkownik usunięty'}`, 'success');
+        await loadUsers();
+        renderUsers();
+    } catch (error) {
+        toast(error.message || 'Błąd podczas usuwania', 'error');
+    }
+}
+
+// ==================== NAVIGATION ====================
+
+function switchView(viewName) {
+    $$('.view').forEach(v => v.classList.remove('active'));
+    $(`#${viewName}-view`).classList.add('active');
+    
+    $$('.nav-item').forEach(n => n.classList.remove('active'));
+    $(`[data-view="${viewName}"]`).classList.add('active');
+    
+    // Load view data
+    switch (viewName) {
+        case 'events':
+            renderEvents();
+            break;
+        case 'costs':
+            loadCosts();
+            break;
+        case 'revenue':
+            loadRevenue();
+            break;
+        case 'receipts':
+            loadReceipts();
+            break;
+        case 'reports':
+            $('#report-content').innerHTML = '<p class="text-center" style="color: var(--text-muted)">Wybierz wydarzenie</p>';
+            break;
+        case 'users':
+            loadUsers().then(renderUsers);
+            break;
+    }
+    
+    // Close sidebar on mobile
+    $('#sidebar').classList.remove('active');
+}
+
+function toggleChat() {
+    const panel = $('#chat-panel');
+    const isOpening = !panel.classList.contains('active');
+    
+    panel.classList.toggle('active');
+    
+    if (isOpening) {
+        markMessagesRead();
+        loadChatHistory();
+        $('#chat-input').focus();
+    }
+}
+
+// ==================== EVENT LISTENERS ====================
+
 document.addEventListener('DOMContentLoaded', () => {
-    checkAuth();
+    // Login form
+    $('#login-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const email = $('#login-email').value;
+        const password = $('#login-password').value;
+        
+        try {
+            await login(email, password);
+        } catch (error) {
+            $('#login-error').textContent = error.message;
+        }
+    });
+    
+    // Logout
+    $('#logout-btn').addEventListener('click', logout);
+    
+    // Menu toggle
+    $('#menu-toggle').addEventListener('click', () => {
+        $('#sidebar').classList.toggle('active');
+    });
+    
+    // Navigation
+    $$('.nav-item').forEach(item => {
+        item.addEventListener('click', (e) => {
+            e.preventDefault();
+            const view = item.dataset.view;
+            if (view) switchView(view);
+        });
+    });
+    
+    // Chat toggle
+    $('#chat-toggle').addEventListener('click', toggleChat);
+    $('#chat-close').addEventListener('click', toggleChat);
+    
+    // Chat form
+    $('#chat-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const input = $('#chat-input');
+        const content = input.value.trim();
+        if (content) {
+            sendChatMessage(content);
+            input.value = '';
+        }
+    });
+    
+    // Typing indicator
+    let typingThrottle = null;
+    $('#chat-input').addEventListener('input', () => {
+        if (!typingThrottle) {
+            sendTypingIndicator();
+            typingThrottle = setTimeout(() => { typingThrottle = null; }, 2000);
+        }
+    });
+    
+    // Modal close
+    $('.modal-close').addEventListener('click', hideModal);
+    $('#modal').addEventListener('click', (e) => {
+        if (e.target === $('#modal')) hideModal();
+    });
+    
+    // Action buttons
+    $('#add-event-btn').addEventListener('click', () => showEventForm());
+    $('#add-cost-btn').addEventListener('click', () => showCostForm());
+    $('#add-revenue-btn').addEventListener('click', () => showRevenueForm());
+    $('#add-receipt-btn').addEventListener('click', () => showReceiptForm());
+    
+    // User management button (only visible for owners/managers)
+    const addUserBtn = $('#add-user-btn');
+    if (addUserBtn) {
+        addUserBtn.addEventListener('click', () => addUser());
+    }
+    
+    // Filters
+    $('#cost-event-filter').addEventListener('change', (e) => loadCosts(e.target.value || null));
+    $('#revenue-event-filter').addEventListener('change', (e) => loadRevenue(e.target.value || null));
+    $('#report-event-select').addEventListener('change', (e) => loadReport(e.target.value));
+    
+    // Close sidebar when clicking outside on mobile
+    document.addEventListener('click', (e) => {
+        const sidebar = $('#sidebar');
+        const menuBtn = $('#menu-toggle');
+        if (window.innerWidth <= 768 && 
+            sidebar.classList.contains('active') && 
+            !sidebar.contains(e.target) && 
+            !menuBtn.contains(e.target)) {
+            sidebar.classList.remove('active');
+        }
+    });
+    
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            hideModal();
+            $('#chat-panel').classList.remove('active');
+            $('#sidebar').classList.remove('active');
+        }
+    });
+    
+    // Check auth on load (async for URL login support)
+    checkAuth().catch(err => console.error('Auth check failed:', err));
 });

@@ -1,7 +1,6 @@
 """
 Database configuration for Music Venue Management System
 Supports SQLite (development) and PostgreSQL (production)
-FIXED VERSION
 """
 
 import os
@@ -23,12 +22,7 @@ if DATABASE_URL.startswith("sqlite"):
         connect_args={"check_same_thread": False}
     )
 else:
-    engine = create_engine(
-        DATABASE_URL, 
-        pool_pre_ping=True,
-        pool_size=5,
-        max_overflow=10
-    )
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -44,6 +38,5 @@ def get_db():
 
 def init_db():
     """Initialize database tables"""
-    # FIXED: Removed non-existent FinancialReport import
-    from models import User, Event, Cost, Revenue, StaffAssignment, Receipt, ChatMessage
+    from models import User, Event, Cost, Revenue, FinancialReport
     Base.metadata.create_all(bind=engine)
