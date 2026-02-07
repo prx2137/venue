@@ -19,8 +19,8 @@ import asyncio
 import base64
 import httpx
 
-# OCR.space API Key
-OCR_API_KEY = "K82925827188957"
+# OCR.space API Key - get free key at https://ocr.space/ocrapi
+OCR_API_KEY = os.getenv("OCR_API_KEY", "K82925827188957")
 
 from database import engine, get_db, Base
 from models import User, Event, Cost, Revenue, Receipt, ChatMessage, PrivateMessage, StaffPosition, LineupEntry
