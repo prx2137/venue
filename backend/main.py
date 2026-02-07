@@ -17,6 +17,10 @@ import re
 import os
 import asyncio
 import base64
+import httpx
+
+# OCR.space API Key
+OCR_API_KEY = "K82925827188957"
 
 from database import engine, get_db, Base
 from models import User, Event, Cost, Revenue, Receipt, ChatMessage, PrivateMessage, StaffPosition, LineupEntry
@@ -1017,6 +1021,42 @@ def parse_receipt_ocr(ocr_text: str) -> dict:
     return result
 
 
+async def call_ocr_api(image_base64: str, mime_type: str) -> str:
+    """Call OCR.space API to extract text from image"""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://api.ocr.space/parse/image",
+                data={
+                    "apikey": OCR_API_KEY,
+                    "base64Image": f"data:{mime_type};base64,{image_base64}",
+                    "language": "pol",  # Polish language
+                    "isOverlayRequired": False,
+                    "detectOrientation": True,
+                    "scale": True,
+                    "OCREngine": 2  # Engine 2 is better for receipts
+                }
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("IsErroredOnProcessing"):
+                    error_msg = result.get("ErrorMessage", ["Unknown error"])
+                    print(f"OCR API Error: {error_msg}")
+                    return ""
+                
+                parsed_results = result.get("ParsedResults", [])
+                if parsed_results:
+                    return parsed_results[0].get("ParsedText", "")
+            else:
+                print(f"OCR API HTTP Error: {response.status_code}")
+                
+    except Exception as e:
+        print(f"OCR API Exception: {e}")
+    
+    return ""
+
+
 @app.post("/api/receipts/upload")
 async def upload_receipt(
     file: UploadFile = File(...),
@@ -1032,8 +1072,12 @@ async def upload_receipt(
     
     image_base64 = base64.b64encode(content).decode()
     
-    # Mock OCR (in real app, use Tesseract or cloud OCR)
-    ocr_text = "BIEDRONKA\nul. Przykładowa 1\n2026-02-07\nPiwo 6.99\nChipsy 4.50\nSUMA PLN: 11.49"
+    # Call real OCR.space API
+    ocr_text = await call_ocr_api(image_base64, file.content_type)
+    
+    if not ocr_text:
+        raise HTTPException(status_code=500, detail="Nie udało się odczytać tekstu z paragonu. Spróbuj z lepszym zdjęciem.")
+    
     parsed = parse_receipt_ocr(ocr_text)
     
     receipt = Receipt(
