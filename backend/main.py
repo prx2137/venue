@@ -1105,6 +1105,15 @@ async def upload_receipt(
     }
 
 
+def parse_items_json(items_str):
+    """Parse parsed_items from JSON string to list"""
+    if not items_str:
+        return []
+    try:
+        return json.loads(items_str)
+    except:
+        return []
+
 @app.get("/api/receipts", response_model=List[ReceiptResponse])
 def list_receipts(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     receipts = db.query(Receipt).order_by(Receipt.created_at.desc()).all()
@@ -1116,7 +1125,7 @@ def list_receipts(current_user: User = Depends(get_current_user), db: Session = 
             receipt_date=r.receipt_date,
             total_amount=r.total_amount,
             ocr_text=r.ocr_text,
-            parsed_items=r.parsed_items,
+            parsed_items=parse_items_json(r.parsed_items),
             status=r.status,
             uploaded_by=r.uploaded_by,
             uploader_name=r.uploader.full_name if r.uploader else None,
@@ -1143,7 +1152,7 @@ def get_receipt(receipt_id: int, current_user: User = Depends(get_current_user),
         receipt_date=receipt.receipt_date,
         total_amount=receipt.total_amount,
         ocr_text=receipt.ocr_text,
-        parsed_items=receipt.parsed_items,
+        parsed_items=parse_items_json(receipt.parsed_items),
         status=receipt.status,
         uploaded_by=receipt.uploaded_by,
         uploader_name=receipt.uploader.full_name if receipt.uploader else None,
@@ -1253,6 +1262,8 @@ def get_event_report(event_id: int, current_user: User = Depends(get_current_use
     
     total_costs = sum(c.amount for c in costs)
     total_revenue = sum(r.amount for r in revenues)
+    profit = total_revenue - total_costs
+    profit_margin = (profit / total_revenue * 100) if total_revenue > 0 else 0
     
     return {
         "event_id": event.id,
@@ -1260,7 +1271,8 @@ def get_event_report(event_id: int, current_user: User = Depends(get_current_use
         "event_date": event.event_date.isoformat(),
         "total_revenue": total_revenue,
         "total_costs": total_costs,
-        "profit": total_revenue - total_costs,
+        "profit": profit,
+        "profit_margin": profit_margin,
         "cost_breakdown": cost_breakdown,
         "revenue_breakdown": revenue_breakdown
     }

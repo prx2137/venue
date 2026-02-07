@@ -1863,11 +1863,11 @@ async function loadReport(eventId) {
                     <span class="report-stat-label">Przychody</span>
                 </div>
                 <div class="report-stat">
-                    <span class="report-stat-value ${report.net_profit >= 0 ? 'text-success' : 'text-danger'}">${formatMoney(report.net_profit)}</span>
+                    <span class="report-stat-value ${report.profit >= 0 ? 'text-success' : 'text-danger'}">${formatMoney(report.profit)}</span>
                     <span class="report-stat-label">Zysk netto</span>
                 </div>
                 <div class="report-stat">
-                    <span class="report-stat-value">${report.profit_margin.toFixed(1)}%</span>
+                    <span class="report-stat-value">${(report.profit_margin || 0).toFixed(1)}%</span>
                     <span class="report-stat-label">Marża</span>
                 </div>
             </div>

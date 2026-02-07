@@ -381,7 +381,7 @@ class ReceiptResponse(BaseModel):
     receipt_date: Optional[datetime]
     total_amount: Optional[float]
     ocr_text: Optional[str]
-    parsed_items: Optional[str]
+    parsed_items: Optional[List] = None
     status: str
     uploaded_by: int
     uploader_name: Optional[str] = None
