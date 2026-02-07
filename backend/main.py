@@ -1022,34 +1022,42 @@ def parse_receipt_ocr(ocr_text: str) -> dict:
 
 
 async def call_ocr_api(image_base64: str, mime_type: str) -> str:
-    """Call OCR.space API to extract text from image with fallback"""
+    """Call OCR.space API to extract text from image with fallback engines"""
+    
+    # Determine file type from mime
+    filetype_map = {
+        "image/jpeg": "JPG",
+        "image/jpg": "JPG", 
+        "image/png": "PNG",
+        "image/gif": "GIF",
+        "image/bmp": "BMP",
+        "image/tiff": "TIF",
+        "image/webp": "WEBP"
+    }
+    filetype = filetype_map.get(mime_type.lower(), "JPG")
     
     # Try Engine 2 first (better for receipts), fallback to Engine 1
     for engine in [2, 1]:
         try:
+            print(f"Trying OCR Engine {engine}...")
             async with httpx.AsyncClient(timeout=60.0) as client:
-                # Ensure mime_type is correct
-                if not mime_type or mime_type == "application/octet-stream":
-                    mime_type = "image/jpeg"
-                
                 response = await client.post(
                     "https://api.ocr.space/parse/image",
                     data={
                         "apikey": OCR_API_KEY,
                         "base64Image": f"data:{mime_type};base64,{image_base64}",
                         "language": "pol",
-                        "isOverlayRequired": "false",
-                        "detectOrientation": "true",
-                        "scale": "true",
-                        "OCREngine": str(engine),
-                        "filetype": mime_type.split("/")[-1].upper()  # JPEG, PNG, etc.
+                        "isOverlayRequired": False,
+                        "detectOrientation": True,
+                        "scale": True,
+                        "filetype": filetype,
+                        "OCREngine": engine
                     }
                 )
                 
-                print(f"OCR Engine {engine} response status: {response.status_code}")
-                
                 if response.status_code == 200:
                     result = response.json()
+                    print(f"OCR Response: {result.get('OCRExitCode', 'N/A')}")
                     
                     if result.get("IsErroredOnProcessing"):
                         error_msg = result.get("ErrorMessage", ["Unknown error"])
@@ -1058,21 +1066,21 @@ async def call_ocr_api(image_base64: str, mime_type: str) -> str:
                     
                     parsed_results = result.get("ParsedResults", [])
                     if parsed_results:
-                        text = parsed_results[0].get("ParsedText", "").strip()
-                        if text:
-                            print(f"OCR Engine {engine} success: {len(text)} chars")
+                        text = parsed_results[0].get("ParsedText", "")
+                        if text.strip():
+                            print(f"OCR Engine {engine} succeeded, got {len(text)} chars")
                             return text
                         else:
-                            print(f"OCR Engine {engine}: empty result")
+                            print(f"OCR Engine {engine} returned empty text")
                             continue
                 else:
-                    print(f"OCR Engine {engine} HTTP Error: {response.status_code}")
-                    continue
+                    print(f"OCR HTTP Error: {response.status_code}")
                     
         except Exception as e:
             print(f"OCR Engine {engine} Exception: {e}")
             continue
     
+    print("All OCR engines failed")
     return ""
 
 
@@ -1093,13 +1101,14 @@ async def upload_receipt(
     image_base64 = base64.b64encode(content).decode()
     
     # Call real OCR.space API
-    print(f"Calling OCR API for file: {file.filename}, content_type: {file.content_type}, size: {len(content)} bytes")
     ocr_text = await call_ocr_api(image_base64, file.content_type)
     
+    # Even if OCR fails, save the receipt so user can edit manually
+    ocr_failed = False
     if not ocr_text:
-        # Still save the receipt even without OCR, user can edit manually
-        print("OCR returned empty, saving receipt anyway for manual processing")
-        ocr_text = "(Nie udało się automatycznie odczytać tekstu - możesz edytować ręcznie)"
+        ocr_text = "(Nie udało się automatycznie odczytać tekstu - edytuj ręcznie)"
+        ocr_failed = True
+        print("OCR failed, saving receipt with placeholder text")
     
     parsed = parse_receipt_ocr(ocr_text)
     
