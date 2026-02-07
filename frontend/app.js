@@ -207,30 +207,36 @@ function connectWebSocket() {
 
 function handleWebSocketMessage(data) {
     switch (data.type) {
+        case 'chat_message':
         case 'new_message':
-            addChatMessage(data.data);
-            if (data.data.sender_id !== state.user.id && !$('#chat-panel').classList.contains('active')) {
+            // Handle both flat and nested format
+            const chatMsg = data.data || data;
+            addChatMessage(chatMsg);
+            if (chatMsg.sender_id !== state.user.id && !$('#chat-panel')?.classList.contains('active')) {
                 state.unreadCount++;
                 updateChatBadge();
                 playNotificationSound();
-                toast(`${data.data.sender_name}: ${data.data.content.substring(0, 50)}...`, 'info');
+                toast(`${chatMsg.sender_name}: ${(chatMsg.content || '').substring(0, 50)}...`, 'info');
             }
             break;
             
         case 'private_message':
-            handlePrivateMessage(data.message);
+            handlePrivateMessage(data.message || data);
             break;
             
         case 'user_online':
-            updateUserStatus(data.data.user_id, true, data.data.full_name);
+            // Handle flat format from backend
+            updateUserStatus(data.user_id, true, data.user_name);
             break;
             
         case 'user_offline':
-            updateUserStatus(data.data.user_id, false, data.data.full_name);
+            // Handle flat format from backend
+            updateUserStatus(data.user_id, false, data.user_name);
             break;
             
         case 'user_typing':
-            showTypingIndicator(data.data.full_name);
+            const typingName = data.data?.full_name || data.full_name || data.user_name;
+            if (typingName) showTypingIndicator(typingName);
             break;
             
         case 'pong':
@@ -324,23 +330,28 @@ function showTypingIndicator(userName) {
 async function loadChatHistory() {
     try {
         const data = await api('/api/chat/history?limit=100');
-        state.chatMessages = data.messages;
-        state.chatUsers = data.users_online;
-        state.unreadCount = data.total_unread;
+        state.chatMessages = data.messages || [];
+        state.chatUsers = data.users_online || [];
+        state.unreadCount = data.total_unread || 0;
         
         renderChatMessages();
         renderChatUsers();
         updateChatBadge();
     } catch (error) {
         console.error('Failed to load chat history:', error);
+        state.chatMessages = [];
+        state.chatUsers = [];
+        state.unreadCount = 0;
     }
 }
 
 function renderChatMessages() {
     const container = $('#chat-messages');
+    if (!container) return;
     container.innerHTML = '';
     
-    state.chatMessages.forEach(msg => {
+    const messages = state.chatMessages || [];
+    messages.forEach(msg => {
         const isOwn = msg.sender_id === state.user.id;
         const isSystem = msg.message_type === 'system';
         
@@ -471,12 +482,14 @@ setInterval(() => {
 async function loadConversations() {
     try {
         const data = await api('/api/messages/conversations');
-        state.conversations = data.conversations;
-        state.privateUnreadCount = data.total_unread;
+        state.conversations = data.conversations || [];
+        state.privateUnreadCount = data.total_unread || 0;
         updatePrivateBadge();
         renderConversations();
     } catch (error) {
         console.error('Failed to load conversations:', error);
+        state.conversations = [];
+        state.privateUnreadCount = 0;
     }
 }
 
@@ -517,12 +530,13 @@ function renderConversations() {
     const container = $('#conversations-list');
     if (!container) return;
     
-    if (!state.conversations.length) {
+    const conversations = state.conversations || [];
+    if (!conversations.length) {
         container.innerHTML = '<p class="text-center" style="color: var(--text-muted); padding: 1rem;">Brak konwersacji</p>';
         return;
     }
     
-    container.innerHTML = state.conversations.map(conv => `
+    container.innerHTML = conversations.map(conv => `
         <div class="conversation-item ${conv.unread_count > 0 ? 'unread' : ''} ${state.currentConversationUserId === conv.user_id ? 'active' : ''}" 
              onclick="openConversation(${conv.user_id})">
             <div class="conversation-avatar">
@@ -567,7 +581,8 @@ function renderPrivateMessages() {
 
 function openConversation(userId) {
     state.currentConversationUserId = userId;
-    const user = state.conversations.find(c => c.user_id === userId);
+    const conversations = state.conversations || [];
+    const user = conversations.find(c => c.user_id === userId);
     
     // Update active state in list
     $$('.conversation-item').forEach(el => el.classList.remove('active'));

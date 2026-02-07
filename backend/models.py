@@ -74,10 +74,12 @@ class CostCategory(str, enum.Enum):
 
 
 class RevenueSource(str, enum.Enum):
-    BOX_OFFICE = "box_office"
-    BAR_SALES = "bar_sales"
-    MERCHANDISE = "merchandise"
+    TICKETS = "tickets"
+    BAR = "bar"
+    VIP = "vip"
+    MERCH = "merch"
     SPONSORSHIP = "sponsorship"
+    RENTAL = "rental"
     OTHER = "other"
 
 

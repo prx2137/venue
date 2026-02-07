@@ -802,7 +802,7 @@ def delete_cost(cost_id: int, current_user: User = Depends(require_role(["owner"
 
 @app.get("/api/costs/categories")
 def get_cost_categories():
-    categories = {
+    return {
         "bar_alcohol": "Alkohol (bar)",
         "bar_beverages": "Napoje (bar)",
         "bar_food": "Jedzenie (bar)",
@@ -820,13 +820,40 @@ def get_cost_categories():
         "food_drinks": "Jedzenie i napoje",
         "other": "Inne"
     }
-    return categories
 
 
-# Alias for frontend compatibility
 @app.get("/api/stats/categories")
 def get_stats_categories():
-    return get_cost_categories()
+    """Returns all categories for frontend dropdowns"""
+    return {
+        "cost_categories": {
+            "bar_alcohol": "Alkohol (bar)",
+            "bar_beverages": "Napoje (bar)",
+            "bar_food": "Jedzenie (bar)",
+            "bar_supplies": "Zaopatrzenie (bar)",
+            "artist_fee": "Honorarium artysty",
+            "sound_engineer": "Realizator dźwięku",
+            "lighting": "Oświetlenie",
+            "staff_wages": "Wynagrodzenia",
+            "security": "Ochrona",
+            "cleaning": "Sprzątanie",
+            "utilities": "Media",
+            "rent": "Wynajem",
+            "equipment": "Sprzęt",
+            "marketing": "Marketing",
+            "food_drinks": "Jedzenie i napoje",
+            "other": "Inne"
+        },
+        "revenue_sources": {
+            "tickets": "Bilety",
+            "bar": "Bar",
+            "vip": "VIP / Rezerwacje",
+            "merch": "Merchandise",
+            "sponsorship": "Sponsoring",
+            "rental": "Wynajem sali",
+            "other": "Inne"
+        }
+    }
 
 
 @app.get("/api/costs/event/{event_id}", response_model=List[CostResponse])
@@ -1226,13 +1253,30 @@ def get_chat_history(current_user: User = Depends(get_current_user), db: Session
     messages = db.query(ChatMessage).order_by(ChatMessage.created_at.desc()).limit(100).all()
     messages.reverse()
     
-    return [{
-        "id": m.id,
-        "sender_id": m.sender_id,
-        "sender_name": m.sender.full_name if m.sender else "Unknown",
-        "content": m.content,
-        "created_at": m.created_at.isoformat()
-    } for m in messages]
+    # Get online users
+    online_users = []
+    for user_id in manager.active_connections.keys():
+        user = db.query(User).filter(User.id == user_id).first()
+        if user:
+            online_users.append({
+                "id": user.id,
+                "full_name": user.full_name,
+                "role": user.role
+            })
+    
+    return {
+        "messages": [{
+            "id": m.id,
+            "sender_id": m.sender_id,
+            "sender_name": m.sender.full_name if m.sender else "Unknown",
+            "sender_role": m.sender.role if m.sender else "worker",
+            "content": m.content,
+            "message_type": m.message_type,
+            "created_at": m.created_at.isoformat()
+        } for m in messages],
+        "users_online": online_users,
+        "total_unread": 0
+    }
 
 
 # ==================== PRIVATE MESSAGES ====================
@@ -1269,13 +1313,21 @@ def get_conversations(current_user: User = Depends(get_current_user), db: Sessio
         conversations.append({
             "user_id": partner.id,
             "user_name": partner.full_name,
+            "user_role": partner.role,
+            "user_position": partner.position,
             "last_message": last_msg.content[:50] if last_msg else "",
             "last_message_time": last_msg.created_at.isoformat() if last_msg else None,
             "unread_count": unread,
             "is_online": manager.is_online(partner.id)
         })
     
-    return sorted(conversations, key=lambda x: x["last_message_time"] or "", reverse=True)
+    total_unread = sum(c["unread_count"] for c in conversations)
+    sorted_convs = sorted(conversations, key=lambda x: x["last_message_time"] or "", reverse=True)
+    
+    return {
+        "conversations": sorted_convs,
+        "total_unread": total_unread
+    }
 
 
 @app.get("/api/messages/{user_id}")
