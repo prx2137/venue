@@ -1,6 +1,6 @@
 """
 SQLAlchemy ORM Models for Music Venue Management System
-With Receipt OCR support and Live Chat
+With Receipt OCR support, Live Chat and Private Messages
 """
 
 from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Text, Enum, Boolean
@@ -15,6 +15,39 @@ class UserRole(str, enum.Enum):
     OWNER = "owner"
     MANAGER = "manager"
     WORKER = "worker"
+
+
+class StaffPosition(str, enum.Enum):
+    """Staff positions at the venue"""
+    SWIETLIK = "swietlik"           # Świetlik
+    TECHNIK = "technik"             # Technik
+    AKUSTYK = "akustyk"             # Akustyk
+    BARMAN = "barman"               # Barman
+    BARBACK = "barback"             # Barback
+    PROMOTOR = "promotor"           # Promotor
+    OCHRONA = "ochrona"             # Ochrona
+    BRAMKA = "bramka"               # Bramka
+    SZATNIA = "szatnia"             # Szatnia
+    REZYDENT = "rezydent"           # Rezydent
+    SALA = "sala"                   # Sala
+    BRAK = "brak"                   # Brak przypisanego stanowiska
+
+
+# Human-readable labels for positions
+POSITION_LABELS = {
+    "swietlik": "Świetlik",
+    "technik": "Technik",
+    "akustyk": "Akustyk",
+    "barman": "Barman",
+    "barback": "Barback",
+    "promotor": "Promotor",
+    "ochrona": "Ochrona",
+    "bramka": "Bramka",
+    "szatnia": "Szatnia",
+    "rezydent": "Rezydent",
+    "sala": "Sala",
+    "brak": "Brak stanowiska"
+}
 
 
 class CostCategory(str, enum.Enum):
@@ -35,6 +68,7 @@ class CostCategory(str, enum.Enum):
     RENT = "rent"
     EQUIPMENT = "equipment"
     MARKETING = "marketing"
+    FOOD_DRINKS = "food_drinks"
     # Other
     OTHER = "other"
 
@@ -61,7 +95,9 @@ class User(Base):
     password_hash = Column(String(255), nullable=False)
     full_name = Column(String(255), nullable=False)
     role = Column(String(50), default=UserRole.WORKER.value)
+    position = Column(String(50), default=StaffPosition.BRAK.value)  # Staff position
     is_active = Column(Boolean, default=True)
+    sound_notifications = Column(Boolean, default=True)  # Sound notifications enabled
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships with explicit foreign_keys
@@ -75,6 +111,10 @@ class User(Base):
     
     # Chat relationships
     sent_messages = relationship("ChatMessage", back_populates="sender", foreign_keys="ChatMessage.sender_id")
+    
+    # Private message relationships
+    sent_private_messages = relationship("PrivateMessage", back_populates="sender", foreign_keys="PrivateMessage.sender_id")
+    received_private_messages = relationship("PrivateMessage", back_populates="recipient", foreign_keys="PrivateMessage.recipient_id")
 
 
 class Event(Base):
@@ -84,8 +124,10 @@ class Event(Base):
     name = Column(String(255), nullable=False)
     description = Column(Text)
     event_date = Column(DateTime, nullable=False)
-    venue_capacity = Column(Integer, default=0)
+    venue = Column(String(255), default="Sala Główna")  # Venue/room name
+    expected_attendees = Column(Integer, default=0)
     ticket_price = Column(Float, default=0.0)
+    status = Column(String(50), default="upcoming")  # upcoming, ongoing, completed, cancelled
     created_by = Column(Integer, ForeignKey("users.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
     
@@ -103,6 +145,7 @@ class Cost(Base):
     category = Column(String(50), nullable=False)
     amount = Column(Float, nullable=False)
     description = Column(Text)
+    cost_date = Column(DateTime, default=datetime.utcnow)
     receipt_id = Column(Integer, ForeignKey("receipts.id"), nullable=True)
     created_by = Column(Integer, ForeignKey("users.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -153,7 +196,7 @@ class Receipt(Base):
 
 
 class ChatMessage(Base):
-    """Live chat messages between users"""
+    """Live chat messages - public channel"""
     __tablename__ = "chat_messages"
     
     id = Column(Integer, primary_key=True, index=True)
@@ -165,3 +208,19 @@ class ChatMessage(Base):
     
     # Relationship
     sender = relationship("User", back_populates="sent_messages", foreign_keys=[sender_id])
+
+
+class PrivateMessage(Base):
+    """Private messages between two users"""
+    __tablename__ = "private_messages"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    sender_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    recipient_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    content = Column(Text, nullable=False)
+    is_read = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    sender = relationship("User", back_populates="sent_private_messages", foreign_keys=[sender_id])
+    recipient = relationship("User", back_populates="received_private_messages", foreign_keys=[recipient_id])

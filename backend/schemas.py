@@ -1,6 +1,6 @@
 """
 Pydantic Schemas for Music Venue Management System
-With Receipt OCR and Live Chat support
+With Receipt OCR, Live Chat and Private Messages support
 """
 
 from pydantic import BaseModel, EmailStr, field_validator, model_validator
@@ -15,6 +15,22 @@ class UserRole(str, Enum):
     OWNER = "owner"
     MANAGER = "manager"
     WORKER = "worker"
+
+
+class StaffPosition(str, Enum):
+    """Staff positions at the venue"""
+    SWIETLIK = "swietlik"
+    TECHNIK = "technik"
+    AKUSTYK = "akustyk"
+    BARMAN = "barman"
+    BARBACK = "barback"
+    PROMOTOR = "promotor"
+    OCHRONA = "ochrona"
+    BRAMKA = "bramka"
+    SZATNIA = "szatnia"
+    REZYDENT = "rezydent"
+    SALA = "sala"
+    BRAK = "brak"
 
 
 class CostCategory(str, Enum):
@@ -32,6 +48,7 @@ class CostCategory(str, Enum):
     RENT = "rent"
     EQUIPMENT = "equipment"
     MARKETING = "marketing"
+    FOOD_DRINKS = "food_drinks"
     OTHER = "other"
 
 
@@ -67,6 +84,7 @@ class UserRegister(BaseModel):
     password: str
     full_name: str
     role: UserRole = UserRole.WORKER
+    position: StaffPosition = StaffPosition.BRAK
     
     @field_validator('password')
     @classmethod
@@ -88,7 +106,9 @@ class UserResponse(BaseModel):
     email: str
     full_name: str
     role: str
+    position: Optional[str] = "brak"
     is_active: bool
+    sound_notifications: Optional[bool] = True
     created_at: datetime
     
     model_config = {"from_attributes": True}
@@ -98,8 +118,10 @@ class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     email: Optional[EmailStr] = None
     role: Optional[UserRole] = None
+    position: Optional[StaffPosition] = None
     is_active: Optional[bool] = None
     password: Optional[str] = None
+    sound_notifications: Optional[bool] = None
     
     @field_validator('password')
     @classmethod
@@ -115,6 +137,7 @@ class UserCreate(BaseModel):
     password: str
     full_name: str
     role: UserRole = UserRole.WORKER
+    position: StaffPosition = StaffPosition.BRAK
     is_active: bool = True
     
     @field_validator('password')
@@ -144,8 +167,10 @@ class EventCreate(BaseModel):
     name: str
     description: Optional[str] = None
     event_date: datetime
-    venue_capacity: int = 0
+    venue: str = "Sala Główna"
+    expected_attendees: int = 0
     ticket_price: float = 0.0
+    status: str = "upcoming"
     
     @field_validator('name')
     @classmethod
@@ -154,7 +179,7 @@ class EventCreate(BaseModel):
             raise ValueError('Nazwa wydarzenia jest wymagana')
         return v.strip()
     
-    @field_validator('venue_capacity', 'ticket_price')
+    @field_validator('expected_attendees', 'ticket_price')
     @classmethod
     def non_negative(cls, v):
         if v < 0:
@@ -166,8 +191,10 @@ class EventUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     event_date: Optional[datetime] = None
-    venue_capacity: Optional[int] = None
+    venue: Optional[str] = None
+    expected_attendees: Optional[int] = None
     ticket_price: Optional[float] = None
+    status: Optional[str] = None
 
 
 class EventResponse(BaseModel):
@@ -175,8 +202,10 @@ class EventResponse(BaseModel):
     name: str
     description: Optional[str]
     event_date: datetime
-    venue_capacity: int
+    venue: Optional[str] = "Sala Główna"
+    expected_attendees: Optional[int] = 0
     ticket_price: float
+    status: Optional[str] = "upcoming"
     created_by: Optional[int]
     created_at: datetime
     
@@ -190,6 +219,7 @@ class CostCreate(BaseModel):
     category: CostCategory
     amount: float
     description: Optional[str] = None
+    cost_date: Optional[datetime] = None
     receipt_id: Optional[int] = None
     
     @field_validator('amount')
@@ -204,6 +234,7 @@ class CostUpdate(BaseModel):
     category: Optional[CostCategory] = None
     amount: Optional[float] = None
     description: Optional[str] = None
+    cost_date: Optional[datetime] = None
     
     @field_validator('amount')
     @classmethod
@@ -219,6 +250,7 @@ class CostResponse(BaseModel):
     category: str
     amount: float
     description: Optional[str]
+    cost_date: Optional[datetime] = None
     receipt_id: Optional[int]
     created_by: Optional[int]
     created_at: datetime
@@ -364,6 +396,7 @@ class ChatUserStatus(BaseModel):
     user_id: int
     full_name: str
     role: str
+    position: Optional[str] = "brak"
     is_online: bool
     last_seen: Optional[datetime] = None
 
@@ -372,6 +405,62 @@ class ChatHistoryResponse(BaseModel):
     messages: List[ChatMessageResponse]
     users_online: List[ChatUserStatus]
     total_unread: int
+
+
+# ==================== PRIVATE MESSAGES ====================
+
+class PrivateMessageCreate(BaseModel):
+    recipient_id: int
+    content: str
+    
+    @field_validator('content')
+    @classmethod
+    def content_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Wiadomość nie może być pusta')
+        if len(v) > 2000:
+            raise ValueError('Wiadomość może mieć maksymalnie 2000 znaków')
+        return v.strip()
+
+
+class PrivateMessageResponse(BaseModel):
+    id: int
+    sender_id: int
+    sender_name: str
+    sender_role: str
+    recipient_id: int
+    recipient_name: str
+    content: str
+    is_read: bool
+    created_at: datetime
+    
+    model_config = {"from_attributes": True}
+
+
+class ConversationResponse(BaseModel):
+    user_id: int
+    user_name: str
+    user_role: str
+    user_position: Optional[str] = "brak"
+    last_message: Optional[str] = None
+    last_message_time: Optional[datetime] = None
+    unread_count: int = 0
+
+
+class PrivateMessagesListResponse(BaseModel):
+    conversations: List[ConversationResponse]
+    total_unread: int
+
+
+# ==================== STAFF POSITIONS ====================
+
+class PositionUpdate(BaseModel):
+    user_id: int
+    position: StaffPosition
+
+
+class StaffPositionsResponse(BaseModel):
+    positions: Dict[str, str]
 
 
 # ==================== REPORTS ====================
@@ -410,3 +499,7 @@ class CategoriesResponse(BaseModel):
 class MessageResponse(BaseModel):
     message: str
     detail: Optional[str] = None
+
+
+class SoundNotificationUpdate(BaseModel):
+    enabled: bool

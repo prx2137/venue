@@ -29,8 +29,38 @@ let state = {
     chatUsers: [],
     unreadCount: 0,
     ws: null,
-    wsReconnectAttempts: 0
+    wsReconnectAttempts: 0,
+    // Private messages
+    privateMessages: [],
+    conversations: [],
+    currentConversationUserId: null,
+    privateUnreadCount: 0,
+    soundEnabled: true,
+    // Staff positions
+    positions: {}
 };
+
+// Position labels
+const POSITION_LABELS = {
+    'swietlik': 'Świetlik',
+    'technik': 'Technik',
+    'akustyk': 'Akustyk',
+    'barman': 'Barman',
+    'barback': 'Barback',
+    'promotor': 'Promotor',
+    'ochrona': 'Ochrona',
+    'bramka': 'Bramka',
+    'szatnia': 'Szatnia',
+    'rezydent': 'Rezydent',
+    'sala': 'Sala',
+    'brak': 'Brak stanowiska'
+};
+
+// Notification sound
+let notificationSound = null;
+try {
+    notificationSound = new Audio('data:audio/wav;base64,UklGRl9vT19XQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YU'+Array(300).join('1'));
+} catch(e) {}
 
 // ==================== DOM ELEMENTS ====================
 
@@ -188,8 +218,13 @@ function handleWebSocketMessage(data) {
             if (data.data.sender_id !== state.user.id && !$('#chat-panel').classList.contains('active')) {
                 state.unreadCount++;
                 updateChatBadge();
+                playNotificationSound();
                 toast(`${data.data.sender_name}: ${data.data.content.substring(0, 50)}...`, 'info');
             }
+            break;
+            
+        case 'private_message':
+            handlePrivateMessage(data.message);
             break;
             
         case 'user_online':
@@ -207,6 +242,45 @@ function handleWebSocketMessage(data) {
         case 'pong':
             // Keep-alive response
             break;
+    }
+}
+
+function handlePrivateMessage(message) {
+    // Update private unread count
+    state.privateUnreadCount++;
+    updatePrivateBadge();
+    
+    // Play notification sound
+    playNotificationSound();
+    
+    // Show toast notification
+    toast(`📩 ${message.sender_name}: ${message.content.substring(0, 30)}...`, 'info');
+    
+    // If currently viewing this conversation, add message and mark as read
+    if (state.currentConversationUserId === message.sender_id) {
+        state.privateMessages.push(message);
+        renderPrivateMessages();
+        markMessagesAsRead(message.sender_id);
+    }
+    
+    // Update conversations list
+    loadConversations();
+}
+
+function playNotificationSound() {
+    if (state.soundEnabled && notificationSound) {
+        try {
+            notificationSound.currentTime = 0;
+            notificationSound.play().catch(() => {});
+        } catch(e) {}
+    }
+}
+
+function updatePrivateBadge() {
+    const badge = $('#private-badge');
+    if (badge) {
+        badge.textContent = state.privateUnreadCount;
+        badge.classList.toggle('hidden', state.privateUnreadCount === 0);
     }
 }
 
@@ -397,6 +471,200 @@ setInterval(() => {
     }
 }, 30000);
 
+
+// ==================== PRIVATE MESSAGES ====================
+
+async function loadConversations() {
+    try {
+        const data = await api('/api/messages/conversations');
+        state.conversations = data.conversations;
+        state.privateUnreadCount = data.total_unread;
+        updatePrivateBadge();
+        renderConversations();
+    } catch (error) {
+        console.error('Failed to load conversations:', error);
+    }
+}
+
+async function loadPrivateMessages(userId) {
+    try {
+        state.currentConversationUserId = userId;
+        const messages = await api(`/api/messages/${userId}`);
+        state.privateMessages = messages;
+        renderPrivateMessages();
+        await loadConversations(); // Refresh unread counts
+    } catch (error) {
+        console.error('Failed to load private messages:', error);
+    }
+}
+
+async function sendPrivateMessage(userId, content) {
+    try {
+        const message = await api(`/api/messages/${userId}`, {
+            method: 'POST',
+            body: JSON.stringify({ recipient_id: userId, content })
+        });
+        state.privateMessages.push(message);
+        renderPrivateMessages();
+    } catch (error) {
+        toast('Nie udało się wysłać wiadomości', 'error');
+    }
+}
+
+async function markMessagesAsRead(userId) {
+    try {
+        await api(`/api/messages/${userId}`);
+    } catch (error) {
+        console.error('Failed to mark messages as read:', error);
+    }
+}
+
+function renderConversations() {
+    const container = $('#conversations-list');
+    if (!container) return;
+    
+    if (!state.conversations.length) {
+        container.innerHTML = '<p class="text-center" style="color: var(--text-muted); padding: 1rem;">Brak konwersacji</p>';
+        return;
+    }
+    
+    container.innerHTML = state.conversations.map(conv => `
+        <div class="conversation-item ${conv.unread_count > 0 ? 'unread' : ''} ${state.currentConversationUserId === conv.user_id ? 'active' : ''}" 
+             onclick="openConversation(${conv.user_id})">
+            <div class="conversation-avatar">
+                ${conv.user_name.charAt(0).toUpperCase()}
+            </div>
+            <div class="conversation-info">
+                <div class="conversation-header">
+                    <span class="conversation-name">${escapeHtml(conv.user_name)}</span>
+                    ${conv.unread_count > 0 ? `<span class="unread-badge">${conv.unread_count}</span>` : ''}
+                </div>
+                <div class="conversation-preview">
+                    ${conv.last_message ? escapeHtml(conv.last_message) : '<em>Rozpocznij rozmowę</em>'}
+                </div>
+                <div class="conversation-meta">
+                    <span class="conversation-role">${getRoleLabel(conv.user_role)}</span>
+                    ${conv.user_position && conv.user_position !== 'brak' ? `<span class="conversation-position">${POSITION_LABELS[conv.user_position] || conv.user_position}</span>` : ''}
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function renderPrivateMessages() {
+    const container = $('#private-messages');
+    if (!container) return;
+    
+    container.innerHTML = '';
+    
+    state.privateMessages.forEach(msg => {
+        const isOwn = msg.sender_id === state.user.id;
+        const messageEl = document.createElement('div');
+        messageEl.className = `private-message ${isOwn ? 'own' : 'other'}`;
+        messageEl.innerHTML = `
+            <div class="pm-content">${escapeHtml(msg.content)}</div>
+            <div class="pm-time">${formatTime(msg.created_at)}</div>
+        `;
+        container.appendChild(messageEl);
+    });
+    
+    container.scrollTop = container.scrollHeight;
+}
+
+function openConversation(userId) {
+    state.currentConversationUserId = userId;
+    const user = state.conversations.find(c => c.user_id === userId);
+    
+    // Update active state in list
+    $$('.conversation-item').forEach(el => el.classList.remove('active'));
+    const activeItem = $(`.conversation-item[onclick*="${userId}"]`);
+    if (activeItem) activeItem.classList.add('active');
+    
+    // Show conversation panel
+    $('#no-conversation-selected').classList.add('hidden');
+    $('#conversation-panel').classList.remove('hidden');
+    $('#conversation-user-name').textContent = user ? user.user_name : 'Użytkownik';
+    
+    // Load messages
+    loadPrivateMessages(userId);
+}
+
+function toggleSoundNotifications() {
+    state.soundEnabled = !state.soundEnabled;
+    
+    // Update UI
+    const btn = $('#sound-toggle');
+    if (btn) {
+        btn.innerHTML = state.soundEnabled ? '🔔' : '🔕';
+        btn.title = state.soundEnabled ? 'Wyłącz dźwięki' : 'Włącz dźwięki';
+    }
+    
+    // Save to server
+    api('/api/users/me/sound-notifications', {
+        method: 'PUT',
+        body: JSON.stringify({ enabled: state.soundEnabled })
+    }).catch(() => {});
+    
+    toast(state.soundEnabled ? 'Dźwięki włączone' : 'Dźwięki wyłączone', 'info');
+}
+
+function showPrivateMessagesPanel() {
+    hideModal();
+    
+    const html = `
+        <div class="private-messages-container">
+            <div class="pm-sidebar">
+                <div class="pm-sidebar-header">
+                    <h3>💬 Wiadomości</h3>
+                    <button class="btn btn-small" id="sound-toggle" onclick="toggleSoundNotifications()" title="${state.soundEnabled ? 'Wyłącz dźwięki' : 'Włącz dźwięki'}">
+                        ${state.soundEnabled ? '🔔' : '🔕'}
+                    </button>
+                </div>
+                <div id="conversations-list" class="conversations-list">
+                    <p class="text-center" style="color: var(--text-muted); padding: 1rem;">Ładowanie...</p>
+                </div>
+            </div>
+            <div class="pm-main">
+                <div id="no-conversation-selected" class="no-conversation">
+                    <div class="no-conversation-icon">💬</div>
+                    <p>Wybierz rozmowę z listy</p>
+                </div>
+                <div id="conversation-panel" class="conversation-panel hidden">
+                    <div class="conversation-header">
+                        <h4 id="conversation-user-name">Użytkownik</h4>
+                    </div>
+                    <div id="private-messages" class="private-messages-list"></div>
+                    <div class="pm-input-area">
+                        <input type="text" id="pm-input" placeholder="Napisz wiadomość..." onkeypress="handlePmKeypress(event)">
+                        <button class="btn btn-primary" onclick="sendCurrentPrivateMessage()">Wyślij</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    showModal('Prywatne wiadomości', html, 'modal-large');
+    loadConversations();
+}
+
+function handlePmKeypress(event) {
+    if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        sendCurrentPrivateMessage();
+    }
+}
+
+function sendCurrentPrivateMessage() {
+    const input = $('#pm-input');
+    const content = input.value.trim();
+    
+    if (!content || !state.currentConversationUserId) return;
+    
+    sendPrivateMessage(state.currentConversationUserId, content);
+    input.value = '';
+}
+
+
 // ==================== UI HELPERS ====================
 
 function showLogin() {
@@ -481,14 +749,20 @@ function toast(message, type = 'info') {
 
 // ==================== MODAL ====================
 
-function showModal(title, content) {
+function showModal(title, content, extraClass = '') {
     $('#modal-title').textContent = title;
     $('#modal-body').innerHTML = content;
-    $('#modal').classList.add('active');
+    const modal = $('#modal');
+    modal.classList.remove('modal-large');
+    if (extraClass) {
+        modal.classList.add(extraClass);
+    }
+    modal.classList.add('active');
 }
 
 function hideModal() {
-    $('#modal').classList.remove('active');
+    const modal = $('#modal');
+    modal.classList.remove('active', 'modal-large');
 }
 
 // ==================== DATA LOADING ====================
@@ -1426,6 +1700,7 @@ function renderUsers() {
         const isCurrentUser = u.id === state.user.id;
         const roleClass = u.role === 'owner' ? 'owner' : (u.role === 'manager' ? 'manager' : 'worker');
         const roleEmoji = u.role === 'owner' ? '👑' : (u.role === 'manager' ? '🎯' : '👤');
+        const positionLabel = u.position && u.position !== 'brak' ? POSITION_LABELS[u.position] || u.position : null;
         
         return `
             <div class="card user-card ${roleClass}" data-user-id="${u.id}">
@@ -1441,28 +1716,43 @@ function renderUsers() {
                         <span class="${u.is_active ? 'status-active' : 'status-inactive'}">
                             ${u.is_active ? '✅ Aktywny' : '❌ Nieaktywny'}
                         </span>
+                        ${positionLabel ? `<span class="user-position">🎭 ${positionLabel}</span>` : ''}
                         <span class="user-date">📅 Dołączył: ${formatDate(u.created_at)}</span>
                     </div>
                 </div>
-                ${canManage ? `
                 <div class="card-footer">
                     <div class="card-actions">
+                        ${!isCurrentUser ? `
+                        <button class="btn btn-small btn-primary" onclick="openDirectMessage(${u.id})" title="Wyślij wiadomość">
+                            💬 Wiadomość
+                        </button>
+                        ` : ''}
+                        ${canManage ? `
                         <button class="btn btn-small btn-secondary" onclick="editUser(${u.id})" title="Edytuj użytkownika">
                             ✏️ Edytuj
                         </button>
                         <button class="btn btn-small btn-danger" onclick="deleteUser(${u.id})" title="Usuń użytkownika">
                             🗑️ Usuń
                         </button>
+                        ` : ''}
                     </div>
                 </div>
-                ` : ''}
             </div>
         `;
     }).join('');
 }
 
+function openDirectMessage(userId) {
+    showPrivateMessagesPanel();
+    setTimeout(() => openConversation(userId), 300);
+}
+
 function addUser() {
     const isOwner = state.user.role === 'owner';
+    
+    const positionOptions = Object.entries(POSITION_LABELS).map(([value, label]) => 
+        `<option value="${value}">${label}</option>`
+    ).join('');
     
     const html = `
         <form id="user-form">
@@ -1488,6 +1778,12 @@ function addUser() {
                     ` : ''}
                 </select>
                 ${!isOwner ? '<small class="form-hint">Jako manager możesz dodawać tylko pracowników</small>' : ''}
+            </div>
+            <div class="form-group">
+                <label>Stanowisko</label>
+                <select name="position" class="form-select">
+                    ${positionOptions}
+                </select>
             </div>
             <div class="form-group">
                 <label class="checkbox-label">
@@ -1519,6 +1815,7 @@ function addUser() {
                     email: formData.get('email').trim().toLowerCase(),
                     password: formData.get('password'),
                     role: formData.get('role'),
+                    position: formData.get('position'),
                     is_active: formData.has('is_active')
                 })
             });
@@ -1540,6 +1837,11 @@ function editUser(id) {
     
     const isOwner = state.user.role === 'owner';
     const canChangeRole = isOwner && user.id !== state.user.id;
+    const canChangePosition = ['owner', 'manager'].includes(state.user.role);
+    
+    const positionOptions = Object.entries(POSITION_LABELS).map(([value, label]) => 
+        `<option value="${value}" ${user.position === value ? 'selected' : ''}>${label}</option>`
+    ).join('');
     
     const html = `
         <form id="user-form">
@@ -1565,6 +1867,13 @@ function editUser(id) {
                     ` : ''}
                 </select>
                 ${!canChangeRole ? '<small class="form-hint">Nie możesz zmienić tej roli</small>' : ''}
+            </div>
+            <div class="form-group">
+                <label>Stanowisko</label>
+                <select name="position" class="form-select" ${!canChangePosition ? 'disabled' : ''}>
+                    ${positionOptions}
+                </select>
+                ${!canChangePosition ? '<small class="form-hint">Tylko właściciel lub manager może zmienić stanowisko</small>' : ''}
             </div>
             <div class="form-group">
                 <label class="checkbox-label">
@@ -1603,6 +1912,11 @@ function editUser(id) {
         // Dodaj rolę tylko jeśli można ją zmienić
         if (canChangeRole) {
             updateData.role = formData.get('role');
+        }
+        
+        // Dodaj stanowisko tylko jeśli można je zmienić
+        if (canChangePosition) {
+            updateData.position = formData.get('position');
         }
         
         try {

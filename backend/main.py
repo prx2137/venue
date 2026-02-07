@@ -20,8 +20,8 @@ import base64
 import httpx
 
 from database import engine, get_db, Base
-from models import User, Event, Cost, Revenue, Receipt, ChatMessage
-from models import UserRole, CostCategory, RevenueSource, ReceiptStatus
+from models import User, Event, Cost, Revenue, Receipt, ChatMessage, PrivateMessage
+from models import UserRole, CostCategory, RevenueSource, ReceiptStatus, StaffPosition, POSITION_LABELS
 from schemas import (
     UserLogin, UserRegister, UserResponse, UserUpdate, UserCreate, Token,
     EventCreate, EventUpdate, EventResponse,
@@ -30,6 +30,8 @@ from schemas import (
     ReceiptUpload, ReceiptUploadResponse, ReceiptResponse, ReceiptOCRResult, OCRItem,
     CreateCostsFromReceipt, CategoriesResponse,
     ChatMessageCreate, ChatMessageResponse, ChatHistoryResponse, ChatUserStatus,
+    PrivateMessageCreate, PrivateMessageResponse, ConversationResponse, PrivateMessagesListResponse,
+    PositionUpdate, StaffPositionsResponse, SoundNotificationUpdate,
     EventReport, PeriodReport, MessageResponse
 )
 from security import verify_password, get_password_hash, create_access_token, verify_token
@@ -1348,6 +1350,208 @@ def get_categories(current_user: User = Depends(get_current_user)):
         cost_categories=cost_categories,
         revenue_sources=revenue_sources
     )
+
+
+# ==================== STAFF POSITIONS ====================
+
+@app.get("/api/staff/positions", response_model=StaffPositionsResponse, tags=["Staff"])
+def get_staff_positions(current_user: User = Depends(get_current_user)):
+    """Get all available staff positions"""
+    return {"positions": POSITION_LABELS}
+
+
+@app.put("/api/users/{user_id}/position", response_model=UserResponse, tags=["Staff"])
+def update_user_position(
+    user_id: int,
+    position_update: PositionUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["owner", "manager"]))
+):
+    """Update user's staff position (owner/manager only)"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Użytkownik nie znaleziony")
+    
+    user.position = position_update.position.value
+    db.commit()
+    db.refresh(user)
+    return UserResponse.model_validate(user)
+
+
+# ==================== SOUND NOTIFICATIONS ====================
+
+@app.put("/api/users/me/sound-notifications", response_model=UserResponse, tags=["Users"])
+def update_sound_notifications(
+    settings: SoundNotificationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Update current user's sound notification settings"""
+    current_user.sound_notifications = settings.enabled
+    db.commit()
+    db.refresh(current_user)
+    return UserResponse.model_validate(current_user)
+
+
+# ==================== PRIVATE MESSAGES ====================
+
+@app.get("/api/messages/conversations", response_model=PrivateMessagesListResponse, tags=["Private Messages"])
+def get_conversations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get list of all conversations for current user"""
+    # Get all users except current
+    users = db.query(User).filter(User.id != current_user.id, User.is_active == True).all()
+    
+    conversations = []
+    total_unread = 0
+    
+    for user in users:
+        # Get last message between current user and this user
+        last_msg = db.query(PrivateMessage).filter(
+            ((PrivateMessage.sender_id == current_user.id) & (PrivateMessage.recipient_id == user.id)) |
+            ((PrivateMessage.sender_id == user.id) & (PrivateMessage.recipient_id == current_user.id))
+        ).order_by(PrivateMessage.created_at.desc()).first()
+        
+        # Count unread messages from this user
+        unread = db.query(PrivateMessage).filter(
+            PrivateMessage.sender_id == user.id,
+            PrivateMessage.recipient_id == current_user.id,
+            PrivateMessage.is_read == False
+        ).count()
+        
+        total_unread += unread
+        
+        conversations.append(ConversationResponse(
+            user_id=user.id,
+            user_name=user.full_name,
+            user_role=user.role,
+            user_position=user.position or "brak",
+            last_message=last_msg.content[:50] + "..." if last_msg and len(last_msg.content) > 50 else (last_msg.content if last_msg else None),
+            last_message_time=last_msg.created_at if last_msg else None,
+            unread_count=unread
+        ))
+    
+    # Sort by last message time (most recent first)
+    conversations.sort(key=lambda x: x.last_message_time or datetime.min, reverse=True)
+    
+    return PrivateMessagesListResponse(conversations=conversations, total_unread=total_unread)
+
+
+@app.get("/api/messages/{user_id}", response_model=List[PrivateMessageResponse], tags=["Private Messages"])
+def get_messages_with_user(
+    user_id: int,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get private messages between current user and specified user"""
+    # Check if user exists
+    other_user = db.query(User).filter(User.id == user_id).first()
+    if not other_user:
+        raise HTTPException(status_code=404, detail="Użytkownik nie znaleziony")
+    
+    # Get messages
+    messages = db.query(PrivateMessage).filter(
+        ((PrivateMessage.sender_id == current_user.id) & (PrivateMessage.recipient_id == user_id)) |
+        ((PrivateMessage.sender_id == user_id) & (PrivateMessage.recipient_id == current_user.id))
+    ).order_by(PrivateMessage.created_at.desc()).limit(limit).all()
+    
+    # Mark received messages as read
+    db.query(PrivateMessage).filter(
+        PrivateMessage.sender_id == user_id,
+        PrivateMessage.recipient_id == current_user.id,
+        PrivateMessage.is_read == False
+    ).update({"is_read": True})
+    db.commit()
+    
+    # Build response
+    result = []
+    for msg in reversed(messages):
+        sender = db.query(User).filter(User.id == msg.sender_id).first()
+        recipient = db.query(User).filter(User.id == msg.recipient_id).first()
+        result.append(PrivateMessageResponse(
+            id=msg.id,
+            sender_id=msg.sender_id,
+            sender_name=sender.full_name if sender else "Unknown",
+            sender_role=sender.role if sender else "worker",
+            recipient_id=msg.recipient_id,
+            recipient_name=recipient.full_name if recipient else "Unknown",
+            content=msg.content,
+            is_read=msg.is_read,
+            created_at=msg.created_at
+        ))
+    
+    return result
+
+
+@app.post("/api/messages/{user_id}", response_model=PrivateMessageResponse, tags=["Private Messages"])
+async def send_private_message(
+    user_id: int,
+    message: PrivateMessageCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Send a private message to a user"""
+    # Check if recipient exists
+    recipient = db.query(User).filter(User.id == user_id).first()
+    if not recipient:
+        raise HTTPException(status_code=404, detail="Użytkownik nie znaleziony")
+    
+    if user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="Nie możesz wysłać wiadomości do siebie")
+    
+    # Create message
+    pm = PrivateMessage(
+        sender_id=current_user.id,
+        recipient_id=user_id,
+        content=message.content
+    )
+    db.add(pm)
+    db.commit()
+    db.refresh(pm)
+    
+    # Send via WebSocket if recipient is online
+    if manager.is_online(user_id):
+        await manager.send_personal_message({
+            "type": "private_message",
+            "message": {
+                "id": pm.id,
+                "sender_id": current_user.id,
+                "sender_name": current_user.full_name,
+                "sender_role": current_user.role,
+                "recipient_id": user_id,
+                "content": pm.content,
+                "is_read": False,
+                "created_at": pm.created_at.isoformat()
+            }
+        }, user_id)
+    
+    return PrivateMessageResponse(
+        id=pm.id,
+        sender_id=current_user.id,
+        sender_name=current_user.full_name,
+        sender_role=current_user.role,
+        recipient_id=user_id,
+        recipient_name=recipient.full_name,
+        content=pm.content,
+        is_read=pm.is_read,
+        created_at=pm.created_at
+    )
+
+
+@app.get("/api/messages/unread/count", tags=["Private Messages"])
+def get_unread_count(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get total unread private messages count"""
+    count = db.query(PrivateMessage).filter(
+        PrivateMessage.recipient_id == current_user.id,
+        PrivateMessage.is_read == False
+    ).count()
+    return {"unread_count": count}
 
 
 # ==================== FRONTEND SERVING ====================
