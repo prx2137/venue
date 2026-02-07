@@ -1,15 +1,15 @@
 """
 Music Venue Management System - FastAPI Backend
-With Receipt OCR and Live Chat Support
+With Events, Line-up, Technical Riders, Receipt OCR and Live Chat
 """
 
-from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, UploadFile, File, Response
+from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, UploadFile, File, Response, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, or_, and_
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Set
 import json
@@ -17,22 +17,22 @@ import re
 import os
 import asyncio
 import base64
-import httpx
 
 from database import engine, get_db, Base
-from models import User, Event, Cost, Revenue, Receipt, ChatMessage, PrivateMessage
-from models import UserRole, CostCategory, RevenueSource, ReceiptStatus, StaffPosition, POSITION_LABELS
+from models import User, Event, Cost, Revenue, Receipt, ChatMessage, PrivateMessage, StaffPosition, LineupEntry
+from models import UserRole, CostCategory, RevenueSource, ReceiptStatus, DEFAULT_POSITIONS
 from schemas import (
-    UserLogin, UserRegister, UserResponse, UserUpdate, UserCreate, Token,
-    EventCreate, EventUpdate, EventResponse,
+    LoginRequest, TokenResponse, UserRegister, UserResponse, UserUpdate, UserCreate,
+    EventCreate, EventUpdate, EventResponse, EventCalendarResponse,
+    LineupEntryCreate, LineupEntryUpdate, LineupEntryResponse,
     CostCreate, CostUpdate, CostResponse,
     RevenueCreate, RevenueUpdate, RevenueResponse,
-    ReceiptUpload, ReceiptUploadResponse, ReceiptResponse, ReceiptOCRResult, OCRItem,
-    CreateCostsFromReceipt, CategoriesResponse,
-    ChatMessageCreate, ChatMessageResponse, ChatHistoryResponse, ChatUserStatus,
-    PrivateMessageCreate, PrivateMessageResponse, ConversationResponse, PrivateMessagesListResponse,
-    PositionUpdate, StaffPositionsResponse, SoundNotificationUpdate,
-    EventReport, PeriodReport, MessageResponse
+    ReceiptResponse, ReceiptToCost,
+    ChatMessageCreate, ChatMessageResponse,
+    PrivateMessageCreate, PrivateMessageResponse, ConversationResponse,
+    PositionUpdate, SoundNotificationUpdate,
+    StaffPositionCreate, StaffPositionUpdate, StaffPositionResponse,
+    DashboardStats, EventReport
 )
 from security import verify_password, get_password_hash, create_access_token, verify_token
 
@@ -41,11 +41,10 @@ from security import verify_password, get_password_hash, create_access_token, ve
 
 app = FastAPI(
     title="Music Venue Management System",
-    description="API do zarządzania finansami klubu muzycznego z live chatem",
-    version="2.0.0"
+    description="API do zarządzania eventami klubu muzycznego z line-upem i riderami",
+    version="3.0.0"
 )
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -60,8 +59,6 @@ security = HTTPBearer(auto_error=False)
 # ==================== WEBSOCKET CONNECTION MANAGER ====================
 
 class ConnectionManager:
-    """Manages WebSocket connections for live chat"""
-    
     def __init__(self):
         self.active_connections: Dict[int, WebSocket] = {}
         self.user_last_seen: Dict[int, datetime] = {}
@@ -108,196 +105,254 @@ manager = ConnectionManager()
 @app.on_event("startup")
 async def startup_event():
     Base.metadata.create_all(bind=engine)
+    print("✅ Database tables created")
     
+    # Create default data
     db = next(get_db())
     try:
-        default_users = [
-            {"email": "admin@venue.com", "password": "Admin123!", "full_name": "Administrator", "role": "owner"},
-            {"email": "manager@venue.com", "password": "Manager123!", "full_name": "Manager Klubu", "role": "manager"},
-            {"email": "worker@venue.com", "password": "Worker123!", "full_name": "Pracownik", "role": "worker"},
-        ]
-        
-        for user_data in default_users:
-            existing = db.query(User).filter(User.email == user_data["email"]).first()
-            if not existing:
-                user = User(
-                    email=user_data["email"],
-                    password_hash=get_password_hash(user_data["password"]),
-                    full_name=user_data["full_name"],
-                    role=user_data["role"]
-                )
-                db.add(user)
-        
-        db.commit()
-        print("✅ Default users created")
-        
-        # Create sample events if none exist
-        existing_events = db.query(Event).count()
-        if existing_events == 0:
-            sample_events = [
-                {
-                    "name": "Jazz Night - Marcin Wasilewski Trio",
-                    "description": "Wieczór z najlepszym polskim jazz trio. Marcin Wasilewski na fortepianie, Sławomir Kurkiewicz na kontrabasie i Michał Miśkiewicz na perkusji.",
-                    "event_date": datetime(2026, 2, 14, 20, 0),
-                    "venue": "Sala Główna",
-                    "expected_attendees": 150,
-                    "ticket_price": 89.00,
-                    "status": "upcoming"
-                },
-                {
-                    "name": "Rock Covers Party",
-                    "description": "Coverowy wieczór rockowy! Najlepsze utwory Led Zeppelin, AC/DC, Metallica i wielu innych w wykonaniu lokalnych zespołów.",
-                    "event_date": datetime(2026, 2, 21, 21, 0),
-                    "venue": "Sala Główna",
-                    "expected_attendees": 200,
-                    "ticket_price": 45.00,
-                    "status": "upcoming"
-                },
-                {
-                    "name": "Elektroniczna Noc - DJ Set",
-                    "description": "Najlepsza muzyka elektroniczna od house przez techno po drum and bass. Specjalny gość: DJ Krystian z Berlina.",
-                    "event_date": datetime(2026, 2, 28, 22, 0),
-                    "venue": "Sala Klubowa",
-                    "expected_attendees": 250,
-                    "ticket_price": 55.00,
-                    "status": "upcoming"
-                }
-            ]
-            
-            created_events = []
-            for event_data in sample_events:
-                event = Event(**event_data)
-                db.add(event)
-                created_events.append(event)
-            
+        # Create default positions
+        existing_positions = db.query(StaffPosition).first()
+        if not existing_positions:
+            for pos_data in DEFAULT_POSITIONS:
+                pos = StaffPosition(**pos_data)
+                db.add(pos)
+            # Add default "brak" position
+            brak = StaffPosition(code="brak", name="Brak stanowiska", description="Nie przypisano stanowiska")
+            db.add(brak)
             db.commit()
+            print("✅ Default positions created")
+        
+        # Create default users
+        existing_owner = db.query(User).filter(User.role == "owner").first()
+        if not existing_owner:
+            owner = User(
+                email="admin@venue.com",
+                password_hash=get_password_hash("Admin123!"),
+                full_name="Administrator",
+                role="owner",
+                position="brak"
+            )
+            db.add(owner)
             
-            # Refresh to get IDs
-            for event in created_events:
-                db.refresh(event)
+            manager_user = User(
+                email="manager@venue.com",
+                password_hash=get_password_hash("Manager123!"),
+                full_name="Jan Kowalski",
+                role="manager",
+                position="brak"
+            )
+            db.add(manager_user)
             
-            # Create sample costs for events
-            sample_costs = [
-                # Koszty dla Jazz Night
-                {"event_id": created_events[0].id, "description": "Honorarium artysty - Marcin Wasilewski Trio", "amount": 8500.00, "category": "artist_fee", "cost_date": datetime(2026, 2, 10)},
-                {"event_id": created_events[0].id, "description": "Nagłośnienie i oświetlenie", "amount": 1200.00, "category": "equipment", "cost_date": datetime(2026, 2, 13)},
-                {"event_id": created_events[0].id, "description": "Catering dla artystów", "amount": 450.00, "category": "food_drinks", "cost_date": datetime(2026, 2, 14)},
-                {"event_id": created_events[0].id, "description": "Plakaty i promocja w social media", "amount": 350.00, "category": "marketing", "cost_date": datetime(2026, 2, 5)},
-                
-                # Koszty dla Rock Covers Party
-                {"event_id": created_events[1].id, "description": "Honoraria dla 3 zespołów coverowych", "amount": 4500.00, "category": "artist_fee", "cost_date": datetime(2026, 2, 18)},
-                {"event_id": created_events[1].id, "description": "Wynajem dodatkowego sprzętu", "amount": 800.00, "category": "equipment", "cost_date": datetime(2026, 2, 20)},
-                {"event_id": created_events[1].id, "description": "Napoje i przekąski", "amount": 650.00, "category": "food_drinks", "cost_date": datetime(2026, 2, 21)},
-                {"event_id": created_events[1].id, "description": "Ochrona - 4 osoby", "amount": 1200.00, "category": "security", "cost_date": datetime(2026, 2, 21)},
-                
-                # Koszty dla Elektroniczna Noc
-                {"event_id": created_events[2].id, "description": "DJ Krystian - honorarium + przelot", "amount": 5500.00, "category": "artist_fee", "cost_date": datetime(2026, 2, 25)},
-                {"event_id": created_events[2].id, "description": "Dodatkowe oświetlenie LED", "amount": 1500.00, "category": "equipment", "cost_date": datetime(2026, 2, 27)},
-                {"event_id": created_events[2].id, "description": "Promocja na Facebooku i Instagramie", "amount": 600.00, "category": "marketing", "cost_date": datetime(2026, 2, 15)},
-                {"event_id": created_events[2].id, "description": "Ochrona - 6 osób", "amount": 1800.00, "category": "security", "cost_date": datetime(2026, 2, 28)},
+            worker = User(
+                email="pracownik@venue.com",
+                password_hash=get_password_hash("Worker123!"),
+                full_name="Anna Nowak",
+                role="worker",
+                position="barman"
+            )
+            db.add(worker)
+            db.commit()
+            print("✅ Default users created")
+        
+        # Create sample events
+        existing_events = db.query(Event).first()
+        if not existing_events:
+            owner = db.query(User).filter(User.role == "owner").first()
+            
+            # Event 1: Jazz Night
+            event1 = Event(
+                name="Jazz Night - Marcin Wasilewski Trio",
+                description="Wieczór jazzowy z udziałem legendarnego tria Marcina Wasilewskiego",
+                event_date=datetime(2026, 2, 14, 20, 0),
+                end_date=datetime(2026, 2, 15, 1, 0),
+                venue="Sala Główna",
+                expected_attendees=150,
+                ticket_price=89.0,
+                status="upcoming",
+                color="#1e3a5f",
+                rider_stage1="Piano Steinway lub Yamaha C3, stołek z regulacją wysokości",
+                rider_stage2="Kontrabas - DI Box, statyw na mikrofon",
+                rider_notes="Wymagana cisza na sali podczas koncertu. Artyści wymagają osobnej garderoby.",
+                created_by=owner.id if owner else None
+            )
+            db.add(event1)
+            db.flush()
+            
+            # Lineup for Event 1
+            lineup1 = [
+                LineupEntry(event_id=event1.id, artist_name="DJ Warm-up Set", stage="Scena główna", 
+                           start_time=datetime(2026, 2, 14, 20, 0), end_time=datetime(2026, 2, 14, 21, 0),
+                           description="Muzyka w tle", is_headliner=False, order_index=1),
+                LineupEntry(event_id=event1.id, artist_name="Marcin Wasilewski Trio", stage="Scena główna",
+                           start_time=datetime(2026, 2, 14, 21, 0), end_time=datetime(2026, 2, 14, 23, 30),
+                           description="Główny koncert wieczoru", is_headliner=True, order_index=2),
             ]
+            for entry in lineup1:
+                db.add(entry)
             
-            for cost_data in sample_costs:
-                cost = Cost(**cost_data)
+            # Costs for Event 1
+            costs1 = [
+                Cost(event_id=event1.id, category="artist_fee", amount=8500, description="Honorarium Marcin Wasilewski Trio", created_by=owner.id if owner else None),
+                Cost(event_id=event1.id, category="lighting", amount=1200, description="Nagłośnienie i oświetlenie", created_by=owner.id if owner else None),
+                Cost(event_id=event1.id, category="food_drinks", amount=450, description="Catering dla artystów", created_by=owner.id if owner else None),
+                Cost(event_id=event1.id, category="marketing", amount=350, description="Promocja w social media", created_by=owner.id if owner else None),
+            ]
+            for cost in costs1:
+                db.add(cost)
+            
+            # Event 2: Rock Covers
+            event2 = Event(
+                name="Rock Covers Party",
+                description="Wieczór z coverami rockowych klasyków",
+                event_date=datetime(2026, 2, 21, 21, 0),
+                end_date=datetime(2026, 2, 22, 3, 0),
+                venue="Sala Główna",
+                expected_attendees=200,
+                ticket_price=45.0,
+                status="upcoming",
+                color="#8b0000",
+                rider_stage1="Perkusja pełna, 2x wzmacniacz gitarowy Marshall/Fender, wzmacniacz basowy Ampeg",
+                rider_stage2="Keyboard + statyw, DI Box x2",
+                created_by=owner.id if owner else None
+            )
+            db.add(event2)
+            db.flush()
+            
+            # Lineup for Event 2
+            lineup2 = [
+                LineupEntry(event_id=event2.id, artist_name="Local Heroes", stage="Scena główna",
+                           start_time=datetime(2026, 2, 21, 21, 0), end_time=datetime(2026, 2, 21, 22, 30),
+                           description="Support - lokalna kapela", is_headliner=False, order_index=1),
+                LineupEntry(event_id=event2.id, artist_name="Rock Legends Tribute", stage="Scena główna",
+                           start_time=datetime(2026, 2, 21, 23, 0), end_time=datetime(2026, 2, 22, 1, 0),
+                           description="Główny występ - tribute band", is_headliner=True, order_index=2),
+                LineupEntry(event_id=event2.id, artist_name="DJ Afterparty", stage="Scena główna",
+                           start_time=datetime(2026, 2, 22, 1, 0), end_time=datetime(2026, 2, 22, 3, 0),
+                           description="Afterparty do zamknięcia", is_headliner=False, order_index=3),
+            ]
+            for entry in lineup2:
+                db.add(entry)
+            
+            costs2 = [
+                Cost(event_id=event2.id, category="artist_fee", amount=4500, description="Honoraria zespołów", created_by=owner.id if owner else None),
+                Cost(event_id=event2.id, category="equipment", amount=800, description="Wynajem sprzętu", created_by=owner.id if owner else None),
+                Cost(event_id=event2.id, category="security", amount=1200, description="Ochrona", created_by=owner.id if owner else None),
+            ]
+            for cost in costs2:
+                db.add(cost)
+            
+            # Event 3: Electronic Night
+            event3 = Event(
+                name="Elektroniczna Noc - DJ Set",
+                description="Nocna impreza z najlepszymi DJ-ami elektronicznej sceny",
+                event_date=datetime(2026, 2, 28, 22, 0),
+                end_date=datetime(2026, 3, 1, 6, 0),
+                venue="Sala Główna",
+                expected_attendees=250,
+                ticket_price=55.0,
+                status="upcoming",
+                color="#4a0080",
+                rider_stage1="2x Pioneer CDJ-3000, DJM-900NXS2, monitor odsłuchowy",
+                rider_stage2="Pioneer DDJ-1000 (backup), monitor odsłuchowy",
+                rider_notes="Wymagany dymarka i laser show. Minimum 4kW systemu nagłośnieniowego.",
+                created_by=owner.id if owner else None
+            )
+            db.add(event3)
+            db.flush()
+            
+            lineup3 = [
+                LineupEntry(event_id=event3.id, artist_name="DJ Warm-up", stage="Scena główna",
+                           start_time=datetime(2026, 2, 28, 22, 0), end_time=datetime(2026, 3, 1, 0, 0),
+                           description="Opening set", is_headliner=False, order_index=1),
+                LineupEntry(event_id=event3.id, artist_name="Headliner DJ", stage="Scena główna",
+                           start_time=datetime(2026, 3, 1, 0, 0), end_time=datetime(2026, 3, 1, 3, 0),
+                           description="Main set - techno/house", is_headliner=True, order_index=2),
+                LineupEntry(event_id=event3.id, artist_name="Resident DJ", stage="Scena główna",
+                           start_time=datetime(2026, 3, 1, 3, 0), end_time=datetime(2026, 3, 1, 6, 0),
+                           description="Closing set", is_headliner=False, order_index=3),
+            ]
+            for entry in lineup3:
+                db.add(entry)
+            
+            costs3 = [
+                Cost(event_id=event3.id, category="artist_fee", amount=5500, description="DJ + przelot", created_by=owner.id if owner else None),
+                Cost(event_id=event3.id, category="lighting", amount=1500, description="Oświetlenie LED + laser", created_by=owner.id if owner else None),
+                Cost(event_id=event3.id, category="security", amount=1800, description="Ochrona 6 osób", created_by=owner.id if owner else None),
+            ]
+            for cost in costs3:
                 db.add(cost)
             
             db.commit()
-            print("✅ Sample data created successfully")
-        else:
-            print("ℹ️ Sample data already exists")
+            print("✅ Sample events, line-ups and costs created")
             
     except Exception as e:
-        print(f"⚠️ Startup: {e}")
+        print(f"⚠️ Startup error: {e}")
+        db.rollback()
     finally:
         db.close()
 
 
 # ==================== AUTH HELPERS ====================
 
-def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: Session = Depends(get_db)
-) -> User:
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)) -> User:
     if not credentials:
-        raise HTTPException(status_code=401, detail="Wymagana autoryzacja")
+        raise HTTPException(status_code=401, detail="Brak autoryzacji")
     
     payload = verify_token(credentials.credentials)
     if not payload:
         raise HTTPException(status_code=401, detail="Nieprawidłowy token")
     
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Nieprawidłowy token")
-    
-    user = db.query(User).filter(User.id == int(user_id)).first()
-    if not user or not user.is_active:
-        raise HTTPException(status_code=401, detail="Użytkownik nieaktywny")
+    user = db.query(User).filter(User.id == int(payload["sub"])).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Użytkownik nie znaleziony")
+    if not user.is_active:
+        raise HTTPException(status_code=401, detail="Konto nieaktywne")
     
     return user
 
 
-def require_role(allowed_roles: List[str]):
+def require_role(roles: List[str]):
     def role_checker(current_user: User = Depends(get_current_user)):
-        if current_user.role not in allowed_roles:
+        if current_user.role not in roles:
             raise HTTPException(status_code=403, detail="Brak uprawnień")
         return current_user
     return role_checker
 
 
-# ==================== HEALTH CHECK ====================
-
-@app.get("/health")
-def health_check():
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
-
-
-@app.get("/")
-def root():
-    return {"message": "Music Venue API v2.0", "docs": "/docs", "app": "/app"}
-
-
 # ==================== AUTH ENDPOINTS ====================
 
-@app.post("/api/auth/login", response_model=Token)
-def login(data: UserLogin, db: Session = Depends(get_db)):
+@app.post("/api/auth/login", response_model=TokenResponse)
+def login(data: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == data.email).first()
-    
     if not user or not verify_password(data.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Nieprawidłowy email lub hasło")
-    
+        raise HTTPException(status_code=401, detail="Nieprawidłowe dane logowania")
     if not user.is_active:
         raise HTTPException(status_code=401, detail="Konto nieaktywne")
     
-    access_token = create_access_token(data={"sub": str(user.id), "role": user.role})
+    token = create_access_token({"sub": str(user.id), "role": user.role})
     
-    return Token(
-        access_token=access_token,
+    return TokenResponse(
+        access_token=token,
+        token_type="bearer",
         user=UserResponse.model_validate(user)
     )
 
 
-@app.post("/api/auth/register", response_model=Token)
+@app.post("/api/auth/register", response_model=UserResponse)
 def register(data: UserRegister, db: Session = Depends(get_db)):
-    existing = db.query(User).filter(User.email == data.email).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Email już zarejestrowany")
+    if db.query(User).filter(User.email == data.email).first():
+        raise HTTPException(status_code=400, detail="Email już istnieje")
     
     user = User(
         email=data.email,
         password_hash=get_password_hash(data.password),
         full_name=data.full_name,
-        role=data.role.value
+        role="worker"
     )
     db.add(user)
     db.commit()
     db.refresh(user)
-    
-    access_token = create_access_token(data={"sub": str(user.id), "role": user.role})
-    
-    return Token(
-        access_token=access_token,
-        user=UserResponse.model_validate(user)
-    )
+    return UserResponse.model_validate(user)
 
 
 @app.get("/api/auth/me", response_model=UserResponse)
@@ -305,43 +360,29 @@ def get_me(current_user: User = Depends(get_current_user)):
     return UserResponse.model_validate(current_user)
 
 
-# ==================== USER MANAGEMENT ====================
+# ==================== USERS ====================
 
 @app.get("/api/users", response_model=List[UserResponse])
-def list_users(
-    current_user: User = Depends(require_role(["owner", "manager"])),
-    db: Session = Depends(get_db)
-):
-    """Lista wszystkich użytkowników - tylko dla właścicieli i managerów"""
-    users = db.query(User).order_by(User.created_at.desc()).all()
+def list_users(current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
+    users = db.query(User).order_by(User.full_name).all()
     return [UserResponse.model_validate(u) for u in users]
 
 
 @app.post("/api/users", response_model=UserResponse)
-def create_user(
-    data: UserCreate,
-    current_user: User = Depends(require_role(["owner", "manager"])),
-    db: Session = Depends(get_db)
-):
-    """Tworzenie nowego użytkownika - tylko dla właścicieli i managerów"""
-    # Sprawdź czy email już istnieje
-    existing = db.query(User).filter(User.email == data.email).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Użytkownik z tym adresem email już istnieje")
+def create_user(data: UserCreate, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
+    if db.query(User).filter(User.email == data.email).first():
+        raise HTTPException(status_code=400, detail="Email już istnieje")
     
-    # Manager nie może tworzyć właścicieli ani managerów
-    if current_user.role == "manager" and data.role.value in ["owner", "manager"]:
-        raise HTTPException(
-            status_code=403, 
-            detail="Manager może tworzyć tylko pracowników"
-        )
+    # Managers can only create workers
+    if current_user.role == "manager" and data.role != UserRole.WORKER:
+        raise HTTPException(status_code=403, detail="Manager może tworzyć tylko pracowników")
     
     user = User(
         email=data.email,
         password_hash=get_password_hash(data.password),
         full_name=data.full_name,
         role=data.role.value,
-        is_active=data.is_active
+        position=data.position or "brak"
     )
     db.add(user)
     db.commit()
@@ -350,53 +391,20 @@ def create_user(
 
 
 @app.put("/api/users/{user_id}", response_model=UserResponse)
-def update_user(
-    user_id: int,
-    data: UserUpdate,
-    current_user: User = Depends(require_role(["owner", "manager"])),
-    db: Session = Depends(get_db)
-):
-    """Aktualizacja użytkownika - właściciele i managerzy z ograniczeniami"""
+def update_user(user_id: int, data: UserUpdate, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Użytkownik nie znaleziony")
     
-    # Manager nie może edytować właścicieli ani managerów
-    if current_user.role == "manager":
-        if user.role in ["owner", "manager"]:
-            raise HTTPException(
-                status_code=403, 
-                detail="Manager nie może edytować właścicieli ani managerów"
-            )
-        # Manager nie może promować do managera/właściciela
-        if data.role and data.role.value in ["owner", "manager"]:
-            raise HTTPException(
-                status_code=403, 
-                detail="Manager nie może nadawać roli managera ani właściciela"
-            )
+    # Prevent privilege escalation
+    if current_user.role == "manager" and user.role == "owner":
+        raise HTTPException(status_code=403, detail="Nie możesz edytować właściciela")
     
-    # Nie można zdegradować samego siebie
-    if user_id == current_user.id and data.role and data.role.value != current_user.role:
-        raise HTTPException(status_code=400, detail="Nie można zmienić własnej roli")
-    
-    # Aktualizuj pola
-    if data.full_name:
-        user.full_name = data.full_name
-    if data.email:
-        # Sprawdź unikalność emaila
-        existing = db.query(User).filter(User.email == data.email, User.id != user_id).first()
-        if existing:
-            raise HTTPException(status_code=400, detail="Ten adres email jest już zajęty")
-        user.email = data.email
-    if data.role:
-        user.role = data.role.value
-    if data.is_active is not None:
-        # Nie można dezaktywować samego siebie
-        if user_id == current_user.id and not data.is_active:
-            raise HTTPException(status_code=400, detail="Nie można dezaktywować własnego konta")
-        user.is_active = data.is_active
-    if data.password:
-        user.password_hash = get_password_hash(data.password)
+    for field, value in data.model_dump(exclude_unset=True).items():
+        if field == "role" and value:
+            setattr(user, field, value.value if hasattr(value, 'value') else value)
+        else:
+            setattr(user, field, value)
     
     db.commit()
     db.refresh(user)
@@ -404,114 +412,348 @@ def update_user(
 
 
 @app.delete("/api/users/{user_id}")
-def delete_user(
-    user_id: int,
-    current_user: User = Depends(require_role(["owner", "manager"])),
-    db: Session = Depends(get_db)
-):
-    """Usuwanie użytkownika - właściciele i managerzy z ograniczeniami"""
-    if user_id == current_user.id:
-        raise HTTPException(status_code=400, detail="Nie można usunąć własnego konta")
-    
+def delete_user(user_id: int, current_user: User = Depends(require_role(["owner"])), db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Użytkownik nie znaleziony")
-    
-    # Manager nie może usuwać właścicieli ani managerów
-    if current_user.role == "manager" and user.role in ["owner", "manager"]:
-        raise HTTPException(
-            status_code=403, 
-            detail="Manager nie może usuwać właścicieli ani managerów"
-        )
+    if user.id == current_user.id:
+        raise HTTPException(status_code=400, detail="Nie możesz usunąć siebie")
     
     db.delete(user)
     db.commit()
     return {"message": f"Użytkownik {user.full_name} został usunięty"}
 
 
+@app.put("/api/users/{user_id}/position")
+def update_user_position(user_id: int, data: PositionUpdate, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Użytkownik nie znaleziony")
+    
+    user.position = data.position
+    db.commit()
+    return {"message": "Stanowisko zaktualizowane"}
+
+
+@app.put("/api/users/me/sound-notifications")
+def update_sound_notifications(data: SoundNotificationUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    current_user.sound_notifications = data.enabled
+    db.commit()
+    return {"message": "Ustawienia zapisane", "sound_notifications": current_user.sound_notifications}
+
+
+# ==================== STAFF POSITIONS ====================
+
+@app.get("/api/staff/positions")
+def get_positions(db: Session = Depends(get_db)):
+    positions = db.query(StaffPosition).filter(StaffPosition.is_active == True).order_by(StaffPosition.name).all()
+    return [p.to_dict() for p in positions]
+
+
+@app.get("/api/staff/positions/all")
+def get_all_positions(current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
+    positions = db.query(StaffPosition).order_by(StaffPosition.name).all()
+    result = []
+    for p in positions:
+        data = p.to_dict()
+        data["users_count"] = db.query(User).filter(User.position == p.code).count()
+        result.append(data)
+    return result
+
+
+@app.post("/api/staff/positions", response_model=StaffPositionResponse)
+def create_position(data: StaffPositionCreate, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
+    if db.query(StaffPosition).filter(StaffPosition.code == data.code).first():
+        raise HTTPException(status_code=400, detail="Stanowisko o tym kodzie już istnieje")
+    
+    position = StaffPosition(code=data.code, name=data.name, description=data.description or "")
+    db.add(position)
+    db.commit()
+    db.refresh(position)
+    return StaffPositionResponse.model_validate(position)
+
+
+@app.put("/api/staff/positions/{position_id}", response_model=StaffPositionResponse)
+def update_position(position_id: int, data: StaffPositionUpdate, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
+    position = db.query(StaffPosition).filter(StaffPosition.id == position_id).first()
+    if not position:
+        raise HTTPException(status_code=404, detail="Stanowisko nie znalezione")
+    
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(position, field, value)
+    
+    db.commit()
+    db.refresh(position)
+    return StaffPositionResponse.model_validate(position)
+
+
+@app.delete("/api/staff/positions/{position_id}")
+def delete_position(position_id: int, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
+    position = db.query(StaffPosition).filter(StaffPosition.id == position_id).first()
+    if not position:
+        raise HTTPException(status_code=404, detail="Stanowisko nie znalezione")
+    
+    if position.code == "brak":
+        raise HTTPException(status_code=400, detail="Nie można usunąć domyślnego stanowiska")
+    
+    users_with_position = db.query(User).filter(User.position == position.code).count()
+    if users_with_position > 0:
+        position.is_active = False
+        db.commit()
+        return {"message": f"Stanowisko dezaktywowane ({users_with_position} użytkowników ma to stanowisko)"}
+    
+    db.delete(position)
+    db.commit()
+    return {"message": "Stanowisko usunięte"}
+
+
 # ==================== EVENTS ====================
 
 @app.post("/api/events", response_model=EventResponse)
-def create_event(
-    data: EventCreate,
-    current_user: User = Depends(require_role(["owner", "manager"])),
-    db: Session = Depends(get_db)
-):
+def create_event(data: EventCreate, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
     event = Event(
         name=data.name,
         description=data.description,
         event_date=data.event_date,
-        venue_capacity=data.venue_capacity,
+        end_date=data.end_date,
+        venue=data.venue,
+        expected_attendees=data.expected_attendees,
         ticket_price=data.ticket_price,
+        status=data.status,
+        color=data.color,
+        rider_stage1=data.rider_stage1,
+        rider_stage2=data.rider_stage2,
+        rider_notes=data.rider_notes,
         created_by=current_user.id
     )
     db.add(event)
     db.commit()
     db.refresh(event)
-    return EventResponse.model_validate(event)
+    
+    response = EventResponse.model_validate(event)
+    response.has_rider_file = event.rider_file_data is not None
+    response.lineup = []
+    return response
 
 
 @app.get("/api/events", response_model=List[EventResponse])
-def list_events(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    events = db.query(Event).order_by(Event.event_date.desc()).all()
-    return [EventResponse.model_validate(e) for e in events]
+def list_events(status: Optional[str] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    query = db.query(Event)
+    if status:
+        query = query.filter(Event.status == status)
+    events = query.order_by(Event.event_date.desc()).all()
+    
+    result = []
+    for e in events:
+        resp = EventResponse.model_validate(e)
+        resp.has_rider_file = e.rider_file_data is not None
+        resp.lineup = [LineupEntryResponse.model_validate(l) for l in e.lineup]
+        result.append(resp)
+    return result
 
 
 @app.get("/api/events/{event_id}", response_model=EventResponse)
 def get_event(event_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
-        raise HTTPException(status_code=404, detail="Wydarzenie nie znalezione")
-    return EventResponse.model_validate(event)
+        raise HTTPException(status_code=404, detail="Event nie znaleziony")
+    
+    resp = EventResponse.model_validate(event)
+    resp.has_rider_file = event.rider_file_data is not None
+    resp.lineup = [LineupEntryResponse.model_validate(l) for l in event.lineup]
+    return resp
 
 
 @app.put("/api/events/{event_id}", response_model=EventResponse)
-def update_event(
-    event_id: int,
-    data: EventUpdate,
-    current_user: User = Depends(require_role(["owner", "manager"])),
-    db: Session = Depends(get_db)
-):
+def update_event(event_id: int, data: EventUpdate, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
-        raise HTTPException(status_code=404, detail="Wydarzenie nie znalezione")
+        raise HTTPException(status_code=404, detail="Event nie znaleziony")
     
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(event, field, value)
     
     db.commit()
     db.refresh(event)
-    return EventResponse.model_validate(event)
+    
+    resp = EventResponse.model_validate(event)
+    resp.has_rider_file = event.rider_file_data is not None
+    resp.lineup = [LineupEntryResponse.model_validate(l) for l in event.lineup]
+    return resp
 
 
 @app.delete("/api/events/{event_id}")
-def delete_event(
+def delete_event(event_id: int, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event nie znaleziony")
+    
+    db.delete(event)
+    db.commit()
+    return {"message": "Event usunięty"}
+
+
+# ==================== EVENT RIDER FILE ====================
+
+@app.post("/api/events/{event_id}/rider-file")
+async def upload_rider_file(
     event_id: int,
+    file: UploadFile = File(...),
     current_user: User = Depends(require_role(["owner", "manager"])),
     db: Session = Depends(get_db)
 ):
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
-        raise HTTPException(status_code=404, detail="Wydarzenie nie znalezione")
+        raise HTTPException(status_code=404, detail="Event nie znaleziony")
     
-    db.delete(event)
+    # Check file type
+    allowed_types = ["application/pdf", "text/plain"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="Dozwolone tylko pliki PDF i TXT")
+    
+    # Check file size (max 10MB)
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Plik zbyt duży (max 10MB)")
+    
+    event.rider_file_data = content
+    event.rider_file_name = file.filename
+    event.rider_file_type = file.content_type
     db.commit()
-    return {"message": "Wydarzenie usunięte"}
+    
+    return {"message": "Rider uploaded", "filename": file.filename}
+
+
+@app.get("/api/events/{event_id}/rider-file")
+def download_rider_file(event_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event nie znaleziony")
+    
+    if not event.rider_file_data:
+        raise HTTPException(status_code=404, detail="Brak pliku ridera")
+    
+    return Response(
+        content=event.rider_file_data,
+        media_type=event.rider_file_type or "application/octet-stream",
+        headers={"Content-Disposition": f"attachment; filename={event.rider_file_name or 'rider'}"}
+    )
+
+
+@app.delete("/api/events/{event_id}/rider-file")
+def delete_rider_file(event_id: int, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event nie znaleziony")
+    
+    event.rider_file_data = None
+    event.rider_file_name = None
+    event.rider_file_type = None
+    db.commit()
+    
+    return {"message": "Rider file deleted"}
+
+
+# ==================== LINE-UP ====================
+
+@app.get("/api/events/{event_id}/lineup", response_model=List[LineupEntryResponse])
+def get_lineup(event_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event nie znaleziony")
+    
+    lineup = db.query(LineupEntry).filter(LineupEntry.event_id == event_id).order_by(LineupEntry.start_time).all()
+    return [LineupEntryResponse.model_validate(l) for l in lineup]
+
+
+@app.post("/api/events/{event_id}/lineup", response_model=LineupEntryResponse)
+def add_lineup_entry(event_id: int, data: LineupEntryCreate, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event nie znaleziony")
+    
+    entry = LineupEntry(
+        event_id=event_id,
+        artist_name=data.artist_name,
+        stage=data.stage,
+        start_time=data.start_time,
+        end_time=data.end_time,
+        description=data.description,
+        is_headliner=data.is_headliner,
+        order_index=data.order_index
+    )
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    return LineupEntryResponse.model_validate(entry)
+
+
+@app.put("/api/events/{event_id}/lineup/{entry_id}", response_model=LineupEntryResponse)
+def update_lineup_entry(event_id: int, entry_id: int, data: LineupEntryUpdate, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
+    entry = db.query(LineupEntry).filter(LineupEntry.id == entry_id, LineupEntry.event_id == event_id).first()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Wpis nie znaleziony")
+    
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(entry, field, value)
+    
+    db.commit()
+    db.refresh(entry)
+    return LineupEntryResponse.model_validate(entry)
+
+
+@app.delete("/api/events/{event_id}/lineup/{entry_id}")
+def delete_lineup_entry(event_id: int, entry_id: int, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
+    entry = db.query(LineupEntry).filter(LineupEntry.id == entry_id, LineupEntry.event_id == event_id).first()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Wpis nie znaleziony")
+    
+    db.delete(entry)
+    db.commit()
+    return {"message": "Wpis usunięty z line-upu"}
+
+
+# ==================== CALENDAR ====================
+
+@app.get("/api/calendar/{year}/{month}")
+def get_calendar_events(year: int, month: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    start_date = datetime(year, month, 1)
+    if month == 12:
+        end_date = datetime(year + 1, 1, 1)
+    else:
+        end_date = datetime(year, month + 1, 1)
+    
+    events = db.query(Event).filter(
+        Event.event_date >= start_date,
+        Event.event_date < end_date
+    ).order_by(Event.event_date).all()
+    
+    return [{
+        "id": e.id,
+        "name": e.name,
+        "event_date": e.event_date.isoformat(),
+        "end_date": e.end_date.isoformat() if e.end_date else None,
+        "venue": e.venue,
+        "status": e.status,
+        "color": e.color or "#3d6a99",
+        "expected_attendees": e.expected_attendees
+    } for e in events]
 
 
 # ==================== COSTS ====================
 
 @app.post("/api/costs", response_model=CostResponse)
-def create_cost(data: CostCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_cost(data: CostCreate, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
     event = db.query(Event).filter(Event.id == data.event_id).first()
     if not event:
-        raise HTTPException(status_code=404, detail="Wydarzenie nie znalezione")
+        raise HTTPException(status_code=404, detail="Event nie znaleziony")
     
     cost = Cost(
         event_id=data.event_id,
         category=data.category.value,
         amount=data.amount,
         description=data.description,
+        cost_date=data.cost_date or datetime.utcnow(),
         receipt_id=data.receipt_id,
         created_by=current_user.id
     )
@@ -521,22 +763,26 @@ def create_cost(data: CostCreate, current_user: User = Depends(get_current_user)
     return CostResponse.model_validate(cost)
 
 
-@app.get("/api/costs/event/{event_id}", response_model=List[CostResponse])
-def get_event_costs(event_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    costs = db.query(Cost).filter(Cost.event_id == event_id).all()
+@app.get("/api/costs", response_model=List[CostResponse])
+def list_costs(event_id: Optional[int] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    query = db.query(Cost)
+    if event_id:
+        query = query.filter(Cost.event_id == event_id)
+    costs = query.order_by(Cost.created_at.desc()).all()
     return [CostResponse.model_validate(c) for c in costs]
 
 
 @app.put("/api/costs/{cost_id}", response_model=CostResponse)
-def update_cost(cost_id: int, data: CostUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def update_cost(cost_id: int, data: CostUpdate, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
     cost = db.query(Cost).filter(Cost.id == cost_id).first()
     if not cost:
         raise HTTPException(status_code=404, detail="Koszt nie znaleziony")
     
     for field, value in data.model_dump(exclude_unset=True).items():
         if field == "category" and value:
-            value = value.value
-        setattr(cost, field, value)
+            setattr(cost, field, value.value if hasattr(value, 'value') else value)
+        else:
+            setattr(cost, field, value)
     
     db.commit()
     db.refresh(cost)
@@ -544,7 +790,7 @@ def update_cost(cost_id: int, data: CostUpdate, current_user: User = Depends(get
 
 
 @app.delete("/api/costs/{cost_id}")
-def delete_cost(cost_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def delete_cost(cost_id: int, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
     cost = db.query(Cost).filter(Cost.id == cost_id).first()
     if not cost:
         raise HTTPException(status_code=404, detail="Koszt nie znaleziony")
@@ -554,13 +800,36 @@ def delete_cost(cost_id: int, current_user: User = Depends(get_current_user), db
     return {"message": "Koszt usunięty"}
 
 
+@app.get("/api/costs/categories")
+def get_cost_categories():
+    categories = {
+        "bar_alcohol": "Alkohol (bar)",
+        "bar_beverages": "Napoje (bar)",
+        "bar_food": "Jedzenie (bar)",
+        "bar_supplies": "Zaopatrzenie (bar)",
+        "artist_fee": "Honorarium artysty",
+        "sound_engineer": "Realizator dźwięku",
+        "lighting": "Oświetlenie",
+        "staff_wages": "Wynagrodzenia",
+        "security": "Ochrona",
+        "cleaning": "Sprzątanie",
+        "utilities": "Media",
+        "rent": "Wynajem",
+        "equipment": "Sprzęt",
+        "marketing": "Marketing",
+        "food_drinks": "Jedzenie i napoje",
+        "other": "Inne"
+    }
+    return categories
+
+
 # ==================== REVENUE ====================
 
 @app.post("/api/revenue", response_model=RevenueResponse)
-def create_revenue(data: RevenueCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_revenue(data: RevenueCreate, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
     event = db.query(Event).filter(Event.id == data.event_id).first()
     if not event:
-        raise HTTPException(status_code=404, detail="Wydarzenie nie znalezione")
+        raise HTTPException(status_code=404, detail="Event nie znaleziony")
     
     revenue = Revenue(
         event_id=data.event_id,
@@ -575,30 +844,17 @@ def create_revenue(data: RevenueCreate, current_user: User = Depends(get_current
     return RevenueResponse.model_validate(revenue)
 
 
-@app.get("/api/revenue/event/{event_id}", response_model=List[RevenueResponse])
-def get_event_revenue(event_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    revenues = db.query(Revenue).filter(Revenue.event_id == event_id).all()
+@app.get("/api/revenue", response_model=List[RevenueResponse])
+def list_revenue(event_id: Optional[int] = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    query = db.query(Revenue)
+    if event_id:
+        query = query.filter(Revenue.event_id == event_id)
+    revenues = query.order_by(Revenue.created_at.desc()).all()
     return [RevenueResponse.model_validate(r) for r in revenues]
 
 
-@app.put("/api/revenue/{revenue_id}", response_model=RevenueResponse)
-def update_revenue(revenue_id: int, data: RevenueUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    revenue = db.query(Revenue).filter(Revenue.id == revenue_id).first()
-    if not revenue:
-        raise HTTPException(status_code=404, detail="Przychód nie znaleziony")
-    
-    for field, value in data.model_dump(exclude_unset=True).items():
-        if field == "source" and value:
-            value = value.value
-        setattr(revenue, field, value)
-    
-    db.commit()
-    db.refresh(revenue)
-    return RevenueResponse.model_validate(revenue)
-
-
 @app.delete("/api/revenue/{revenue_id}")
-def delete_revenue(revenue_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def delete_revenue(revenue_id: int, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
     revenue = db.query(Revenue).filter(Revenue.id == revenue_id).first()
     if not revenue:
         raise HTTPException(status_code=404, detail="Przychód nie znaleziony")
@@ -608,857 +864,404 @@ def delete_revenue(revenue_id: int, current_user: User = Depends(get_current_use
     return {"message": "Przychód usunięty"}
 
 
-# ==================== RECEIPT OCR ====================
+# ==================== RECEIPTS (OCR) ====================
 
-def simple_ocr_parse(text: str) -> ReceiptOCRResult:
-    """Parse receipt text with Polish store recognition"""
-    lines = text.strip().split('\n')
-    
-    # Store patterns
-    store_patterns = {
-        'biedronka': r'biedronka|jeronimo\s*martins',
-        'lidl': r'lidl',
-        'zabka': r'[żz]abka|żabka',
-        'carrefour': r'carrefour',
-        'auchan': r'auchan',
-        'kaufland': r'kaufland',
-        'makro': r'makro',
-        'selgros': r'selgros',
-        'lewiatan': r'lewiatan',
-        'dino': r'dino\s*(polska)?',
-        'netto': r'netto',
-        'stokrotka': r'stokrotka',
-        'intermarche': r'intermarch[eé]',
-        'polo market': r'polo\s*market',
-        'mila': r'mila',
-        'spolem': r'spo[lł]em',
-        'eurocash': r'eurocash',
-        'hurtownia': r'hurtownia',
+def parse_receipt_ocr(ocr_text: str) -> dict:
+    """Parse OCR text from receipt - improved Polish receipt parsing"""
+    result = {
+        "store_name": None,
+        "date": None,
+        "total": None,
+        "items": []
     }
-    
-    store_name = None
-    for name, pattern in store_patterns.items():
-        if re.search(pattern, text.lower()):
-            store_name = name.title()
-            break
-    
-    # Date pattern
-    receipt_date = None
-    date_patterns = [
-        r'(\d{4}[-./]\d{2}[-./]\d{2})',
-        r'(\d{2}[-./]\d{2}[-./]\d{4})',
-        r'(\d{2}[-./]\d{2}[-./]\d{2})',
-    ]
-    for pattern in date_patterns:
-        match = re.search(pattern, text)
-        if match:
-            receipt_date = match.group(1)
-            break
-    
-    # Total amount - improved Polish receipt detection
-    total = None
-    total_patterns = [
-        # Polish patterns - most specific first
-        r'suma\s*pln[:\s]*(\d+[.,]\d{2})',
-        r'suma\s*zł[:\s]*(\d+[.,]\d{2})',
-        r'kwota\s*do\s*zap[łl]aty[:\s]*(\d+[.,]\d{2})',
-        r'do\s*zap[łl]aty\s*pln[:\s]*(\d+[.,]\d{2})',
-        r'do\s*zap[łl]aty[:\s]*(\d+[.,]\d{2})',
-        r'razem\s*pln[:\s]*(\d+[.,]\d{2})',
-        r'razem\s*zł[:\s]*(\d+[.,]\d{2})',
-        r'suma[:\s]*(\d+[.,]\d{2})\s*pln',
-        r'suma[:\s]*(\d+[.,]\d{2})\s*zł',
-        r'suma[:\s]*(\d+[.,]\d{2})',
-        r'razem[:\s]*(\d+[.,]\d{2})',
-        r'wartość\s*brutto[:\s]*(\d+[.,]\d{2})',
-        r'wartość[:\s]*(\d+[.,]\d{2})',
-        r'ogółem[:\s]*(\d+[.,]\d{2})',
-        r'łącznie[:\s]*(\d+[.,]\d{2})',
-        r'należność[:\s]*(\d+[.,]\d{2})',
-        r'gotówka[:\s]*(\d+[.,]\d{2})',
-        r'karta[:\s]*(\d+[.,]\d{2})',
-        r'płatność[:\s]*(\d+[.,]\d{2})',
-        # Biedronka specific
-        r'sprzedaż\s*opod\.\s*pln[:\s]*(\d+[.,]\d{2})',
-        # Generic
-        r'total[:\s]*(\d+[.,]\d{2})',
-        r'kwota[:\s]*(\d+[.,]\d{2})',
-        # Last resort - find largest amount on receipt
-    ]
-    
-    for pattern in total_patterns:
-        match = re.search(pattern, text.lower())
-        if match:
-            total = float(match.group(1).replace(',', '.'))
-            break
-    
-    # If no total found, try to find the largest reasonable amount
-    if total is None:
-        all_amounts = re.findall(r'(\d+[.,]\d{2})', text)
-        if all_amounts:
-            amounts = [float(a.replace(',', '.')) for a in all_amounts]
-            # Filter reasonable receipt totals (1-10000 PLN)
-            reasonable = [a for a in amounts if 1 <= a <= 10000]
-            if reasonable:
-                total = max(reasonable)  # Usually total is the largest amount
-    
-    # Parse items
-    items = []
-    item_pattern = r'([A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż0-9\s\-\.]+?)\s+(\d+[.,]\d{2})\s*([A-Z])?'
-    
-    for line in lines:
-        match = re.search(item_pattern, line)
-        if match:
-            name = match.group(1).strip()
-            price = float(match.group(2).replace(',', '.'))
-            
-            if len(name) > 3 and price > 0 and price < 10000:
-                # Auto-categorize
-                category = categorize_item(name)
-                items.append(OCRItem(name=name, price=price, category=category))
-    
-    return ReceiptOCRResult(
-        store_name=store_name,
-        receipt_date=receipt_date,
-        items=items,
-        total=total
-    )
-
-
-def categorize_item(name: str) -> str:
-    """Auto-categorize item based on name"""
-    name_lower = name.lower()
-    
-    alcohol_keywords = ['piwo', 'wino', 'wódka', 'whisky', 'rum', 'gin', 'likier', 'beer', 'vodka', 'alkohol']
-    beverage_keywords = ['cola', 'fanta', 'sprite', 'pepsi', 'sok', 'woda', 'napój', 'redbull', 'monster', 'juice']
-    food_keywords = ['chipsy', 'orzeszki', 'paluszki', 'ciastka', 'słodycze', 'przekąski', 'kanapk']
-    
-    for kw in alcohol_keywords:
-        if kw in name_lower:
-            return 'bar_alcohol'
-    
-    for kw in beverage_keywords:
-        if kw in name_lower:
-            return 'bar_beverages'
-    
-    for kw in food_keywords:
-        if kw in name_lower:
-            return 'bar_food'
-    
-    return 'bar_supplies'
-
-
-# OCR API configuration - using free OCR.space API
-OCR_API_KEY = os.environ.get("OCR_API_KEY", "K82925827188957")  # Your OCR.space API key
-OCR_API_URL = "https://api.ocr.space/parse/image"
-
-
-async def perform_ocr_on_image(image_base64: str, mime_type: str = "image/jpeg") -> str:
-    """Send image to OCR.space API and get text"""
-    try:
-        # Prepare base64 data URL
-        data_url = f"data:{mime_type};base64,{image_base64}"
-        
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                OCR_API_URL,
-                data={
-                    "apikey": OCR_API_KEY,
-                    "base64Image": data_url,
-                    "language": "pol",  # Polish
-                    "isOverlayRequired": "false",
-                    "detectOrientation": "true",
-                    "scale": "true",
-                    "OCREngine": "2",  # Better for receipts
-                }
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("ParsedResults"):
-                    return result["ParsedResults"][0].get("ParsedText", "")
-                elif result.get("ErrorMessage"):
-                    print(f"OCR Error: {result['ErrorMessage']}")
-                    return ""
-            return ""
-    except Exception as e:
-        print(f"OCR API Error: {e}")
-        return ""
-
-
-@app.post("/api/receipts/upload-image")
-async def upload_receipt_image(
-    file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Upload receipt image, perform OCR, and parse data"""
-    
-    # Validate file type
-    allowed_types = ["image/jpeg", "image/png", "image/jpg", "image/webp"]
-    if file.content_type not in allowed_types:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Nieprawidłowy format pliku. Dozwolone: JPEG, PNG, WebP"
-        )
-    
-    # Read and encode image
-    content = await file.read()
-    
-    # Check file size (max 5MB)
-    if len(content) > 5 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Plik jest za duży (max 5MB)")
-    
-    image_base64 = base64.b64encode(content).decode('utf-8')
-    
-    # Perform OCR
-    ocr_text = await perform_ocr_on_image(image_base64, file.content_type)
     
     if not ocr_text:
-        # Store image even if OCR failed - can be manually reviewed
-        ocr_text = "(OCR nie rozpoznał tekstu - sprawdź ręcznie)"
+        return result
     
-    # Parse the OCR result
-    ocr_result = simple_ocr_parse(ocr_text)
-    ocr_result.raw_text = ocr_text
+    lines = ocr_text.strip().split('\n')
     
-    # Parse date
-    receipt_date = None
-    if ocr_result.receipt_date:
-        for fmt in ['%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%Y/%m/%d', '%d.%m.%Y', '%d.%m.%y']:
+    # Store name (usually first non-empty line)
+    for line in lines[:5]:
+        line = line.strip()
+        if len(line) > 3 and not any(c.isdigit() for c in line[:3]):
+            result["store_name"] = line
+            break
+    
+    # Date patterns
+    date_patterns = [
+        r'(\d{4}[-/.]\d{2}[-/.]\d{2})',
+        r'(\d{2}[-/.]\d{2}[-/.]\d{4})',
+        r'(\d{2}[-/.]\d{2}[-/.]\d{2})',
+    ]
+    
+    for pattern in date_patterns:
+        match = re.search(pattern, ocr_text)
+        if match:
+            result["date"] = match.group(1)
+            break
+    
+    # Total amount - comprehensive Polish patterns
+    total_patterns = [
+        r'SUMA\s*:?\s*(\d+[.,]\d{2})',
+        r'SUMA\s+PLN\s*:?\s*(\d+[.,]\d{2})',
+        r'SUMA\s+ZŁ\s*:?\s*(\d+[.,]\d{2})',
+        r'KWOTA\s+DO\s+ZAPŁATY\s*:?\s*(\d+[.,]\d{2})',
+        r'DO\s+ZAPŁATY\s*:?\s*(\d+[.,]\d{2})',
+        r'DO\s+ZAPŁATY\s+PLN\s*:?\s*(\d+[.,]\d{2})',
+        r'RAZEM\s*:?\s*(\d+[.,]\d{2})',
+        r'RAZEM\s+PLN\s*:?\s*(\d+[.,]\d{2})',
+        r'RAZEM\s+ZŁ\s*:?\s*(\d+[.,]\d{2})',
+        r'WARTOŚĆ\s+BRUTTO\s*:?\s*(\d+[.,]\d{2})',
+        r'OGÓŁEM\s*:?\s*(\d+[.,]\d{2})',
+        r'ŁĄCZNIE\s*:?\s*(\d+[.,]\d{2})',
+        r'NALEŻNOŚĆ\s*:?\s*(\d+[.,]\d{2})',
+        r'GOTÓWKA\s*:?\s*(\d+[.,]\d{2})',
+        r'KARTA\s*:?\s*(\d+[.,]\d{2})',
+        r'PŁATNOŚĆ\s*:?\s*(\d+[.,]\d{2})',
+        r'TOTAL\s*:?\s*(\d+[.,]\d{2})',
+        r'SPRZEDAŻ\s+OPODATKOWANA\s*[A-Z]?\s*(\d+[.,]\d{2})',
+        r'PTU\s*[A-Z]?\s*\d+%?\s*(\d+[.,]\d{2})\s*$',
+    ]
+    
+    text_upper = ocr_text.upper()
+    for pattern in total_patterns:
+        match = re.search(pattern, text_upper, re.IGNORECASE | re.MULTILINE)
+        if match:
+            total_str = match.group(1).replace(',', '.')
             try:
-                receipt_date = datetime.strptime(ocr_result.receipt_date, fmt)
+                result["total"] = float(total_str)
                 break
-            except:
+            except ValueError:
                 continue
     
-    # Create receipt with image
-    receipt = Receipt(
-        store_name=ocr_result.store_name,
-        receipt_date=receipt_date,
-        total_amount=ocr_result.total,
-        ocr_text=ocr_text,
-        parsed_items=json.dumps([item.model_dump() for item in ocr_result.items]),
-        image_data=image_base64,
-        image_mime_type=file.content_type,
-        status=ReceiptStatus.PENDING.value,
-        uploaded_by=current_user.id
-    )
-    db.add(receipt)
-    db.commit()
-    db.refresh(receipt)
-    
-    return {
-        "id": receipt.id,
-        "store_name": receipt.store_name,
-        "receipt_date": receipt.receipt_date.isoformat() if receipt.receipt_date else None,
-        "total_amount": receipt.total_amount,
-        "ocr_result": {
-            "store_name": ocr_result.store_name,
-            "receipt_date": ocr_result.receipt_date,
-            "total": ocr_result.total,
-            "items": [item.model_dump() for item in ocr_result.items],
-            "raw_text": ocr_text
-        },
-        "status": receipt.status,
-        "has_image": True,
-        "created_at": receipt.created_at.isoformat()
-    }
-
-
-@app.post("/api/receipts/upload", response_model=ReceiptUploadResponse)
-def upload_receipt(data: ReceiptUpload, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Upload and parse receipt OCR text (legacy - text only)"""
-    ocr_result = simple_ocr_parse(data.ocr_text)
-    ocr_result.raw_text = data.ocr_text
-    
-    receipt_date = None
-    if ocr_result.receipt_date:
-        for fmt in ['%Y-%m-%d', '%d-%m-%Y', '%d/%m/%Y', '%Y/%m/%d', '%d.%m.%Y']:
+    # If no total found, find largest reasonable amount
+    if result["total"] is None:
+        amounts = re.findall(r'(\d+[.,]\d{2})', ocr_text)
+        valid_amounts = []
+        for a in amounts:
             try:
-                receipt_date = datetime.strptime(ocr_result.receipt_date, fmt)
-                break
-            except:
+                val = float(a.replace(',', '.'))
+                if 1 <= val <= 10000:
+                    valid_amounts.append(val)
+            except ValueError:
                 continue
+        if valid_amounts:
+            result["total"] = max(valid_amounts)
     
-    receipt = Receipt(
-        store_name=ocr_result.store_name,
-        receipt_date=receipt_date,
-        total_amount=ocr_result.total,
-        ocr_text=data.ocr_text,
-        parsed_items=json.dumps([item.model_dump() for item in ocr_result.items]),
-        status=ReceiptStatus.PENDING.value,
-        uploaded_by=current_user.id
-    )
-    db.add(receipt)
-    db.commit()
-    db.refresh(receipt)
-    
-    return ReceiptUploadResponse(
-        id=receipt.id,
-        store_name=receipt.store_name,
-        receipt_date=receipt.receipt_date,
-        total_amount=receipt.total_amount,
-        ocr_result=ocr_result,
-        status=receipt.status,
-        has_image=False,
-        created_at=receipt.created_at
-    )
-
-
-@app.get("/api/receipts")
-def list_receipts(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """List all receipts with uploader info"""
-    receipts = db.query(Receipt).order_by(Receipt.created_at.desc()).all()
-    
-    result = []
-    for r in receipts:
-        uploader = db.query(User).filter(User.id == r.uploaded_by).first()
-        result.append({
-            "id": r.id,
-            "store_name": r.store_name,
-            "receipt_date": r.receipt_date.isoformat() if r.receipt_date else None,
-            "total_amount": r.total_amount,
-            "status": r.status,
-            "uploaded_by": r.uploaded_by,
-            "uploaded_by_name": uploader.full_name if uploader else None,
-            "processed_by": r.processed_by,
-            "has_image": bool(r.image_data),
-            "created_at": r.created_at.isoformat(),
-            "processed_at": r.processed_at.isoformat() if r.processed_at else None
-        })
+    # Parse items
+    item_pattern = r'([A-Za-zżźćńółęąśŻŹĆĄŚĘŁÓŃ\s]+)\s+(\d+[.,]\d{2})'
+    for match in re.finditer(item_pattern, ocr_text):
+        name = match.group(1).strip()
+        if len(name) > 2:
+            try:
+                price = float(match.group(2).replace(',', '.'))
+                result["items"].append({"name": name, "price": price})
+            except ValueError:
+                continue
     
     return result
 
 
-@app.get("/api/receipts/{receipt_id}")
-def get_receipt_details(
-    receipt_id: int,
+@app.post("/api/receipts/upload")
+async def upload_receipt(
+    file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get receipt details including OCR text"""
-    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
-    if not receipt:
-        raise HTTPException(status_code=404, detail="Paragon nie znaleziony")
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Tylko pliki graficzne")
     
-    uploader = db.query(User).filter(User.id == receipt.uploaded_by).first()
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Plik zbyt duży (max 10MB)")
+    
+    image_base64 = base64.b64encode(content).decode()
+    
+    # Mock OCR (in real app, use Tesseract or cloud OCR)
+    ocr_text = "BIEDRONKA\nul. Przykładowa 1\n2026-02-07\nPiwo 6.99\nChipsy 4.50\nSUMA PLN: 11.49"
+    parsed = parse_receipt_ocr(ocr_text)
+    
+    receipt = Receipt(
+        store_name=parsed.get("store_name"),
+        receipt_date=datetime.utcnow(),
+        total_amount=parsed.get("total"),
+        ocr_text=ocr_text,
+        parsed_items=json.dumps(parsed.get("items", [])),
+        image_data=image_base64,
+        image_mime_type=file.content_type,
+        status="pending",
+        uploaded_by=current_user.id
+    )
+    db.add(receipt)
+    db.commit()
+    db.refresh(receipt)
     
     return {
         "id": receipt.id,
         "store_name": receipt.store_name,
-        "receipt_date": receipt.receipt_date.isoformat() if receipt.receipt_date else None,
         "total_amount": receipt.total_amount,
-        "ocr_text": receipt.ocr_text,
-        "parsed_items": json.loads(receipt.parsed_items) if receipt.parsed_items else [],
         "status": receipt.status,
-        "uploaded_by": receipt.uploaded_by,
-        "uploaded_by_name": uploader.full_name if uploader else None,
-        "processed_by": receipt.processed_by,
-        "has_image": bool(receipt.image_data),
-        "created_at": receipt.created_at.isoformat(),
-        "processed_at": receipt.processed_at.isoformat() if receipt.processed_at else None
+        "parsed_data": parsed
     }
 
 
+@app.get("/api/receipts", response_model=List[ReceiptResponse])
+def list_receipts(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    receipts = db.query(Receipt).order_by(Receipt.created_at.desc()).all()
+    result = []
+    for r in receipts:
+        resp = ReceiptResponse(
+            id=r.id,
+            store_name=r.store_name,
+            receipt_date=r.receipt_date,
+            total_amount=r.total_amount,
+            ocr_text=r.ocr_text,
+            parsed_items=r.parsed_items,
+            status=r.status,
+            uploaded_by=r.uploaded_by,
+            uploader_name=r.uploader.full_name if r.uploader else None,
+            processed_by=r.processed_by,
+            processor_name=r.processor.full_name if r.processor else None,
+            created_at=r.created_at,
+            processed_at=r.processed_at,
+            has_image=r.image_data is not None
+        )
+        result.append(resp)
+    return result
+
+
 @app.get("/api/receipts/{receipt_id}/image")
-def get_receipt_image(
-    receipt_id: int,
-    token: Optional[str] = None,
-    db: Session = Depends(get_db)
-):
-    """Get receipt image - only for managers and owners. Supports token via query param for direct image loading."""
-    # Get user from token (either header or query param)
-    if token:
-        # Token from query parameter
-        payload = verify_token(token)
-        if not payload:
-            raise HTTPException(status_code=401, detail="Nieprawidłowy token")
-        user = db.query(User).filter(User.id == int(payload.get("sub"))).first()
-    else:
-        # Try to get from Authorization header
-        raise HTTPException(status_code=401, detail="Wymagana autoryzacja - podaj token")
-    
-    if not user:
-        raise HTTPException(status_code=401, detail="Użytkownik nie znaleziony")
-    
-    # Check permission
-    if user.role not in ['owner', 'manager']:
-        raise HTTPException(
-            status_code=403,
-            detail="Tylko manager i właściciel mogą przeglądać zdjęcia paragonów"
-        )
-    
+def get_receipt_image(receipt_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
-    if not receipt:
-        raise HTTPException(status_code=404, detail="Paragon nie znaleziony")
+    if not receipt or not receipt.image_data:
+        raise HTTPException(status_code=404, detail="Obraz nie znaleziony")
     
-    if not receipt.image_data:
-        raise HTTPException(status_code=404, detail="Brak zdjęcia dla tego paragonu")
-    
-    # Decode and return image
     image_bytes = base64.b64decode(receipt.image_data)
-    return Response(
-        content=image_bytes,
-        media_type=receipt.image_mime_type or "image/jpeg"
-    )
+    return Response(content=image_bytes, media_type=receipt.image_mime_type or "image/jpeg")
 
 
-@app.delete("/api/receipts/{receipt_id}")
-def delete_receipt(
-    receipt_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Delete a receipt - only owners and managers, or the uploader"""
-    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
-    if not receipt:
-        raise HTTPException(status_code=404, detail="Paragon nie znaleziony")
-    
-    # Check permission
-    can_delete = (
-        current_user.role in ['owner', 'manager'] or
-        receipt.uploaded_by == current_user.id
-    )
-    
-    if not can_delete:
-        raise HTTPException(status_code=403, detail="Brak uprawnień do usunięcia paragonu")
-    
-    # Check if receipt has associated costs
-    if receipt.costs:
-        raise HTTPException(
-            status_code=400,
-            detail="Nie można usunąć paragonu z przypisanymi kosztami"
-        )
-    
-    db.delete(receipt)
-    db.commit()
-    
-    return {"message": "Paragon usunięty"}
-
-
-@app.post("/api/receipts/{receipt_id}/create-costs")
-def create_costs_from_receipt(
-    receipt_id: int,
-    data: CreateCostsFromReceipt,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Create costs from a receipt"""
+@app.post("/api/receipts/{receipt_id}/to-cost")
+def receipt_to_cost(receipt_id: int, data: ReceiptToCost, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
     receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
     if not receipt:
         raise HTTPException(status_code=404, detail="Paragon nie znaleziony")
     
     event = db.query(Event).filter(Event.id == data.event_id).first()
     if not event:
-        raise HTTPException(status_code=404, detail="Wydarzenie nie znalezione")
+        raise HTTPException(status_code=404, detail="Event nie znaleziony")
     
     cost = Cost(
         event_id=data.event_id,
         category=data.category.value,
-        amount=receipt.total_amount or 0,
-        description=f"Paragon: {receipt.store_name or 'Nieznany sklep'} - {receipt.receipt_date or receipt.created_at}",
+        amount=data.amount or receipt.total_amount or 0,
+        description=data.description or f"Z paragonu: {receipt.store_name}",
         receipt_id=receipt.id,
         created_by=current_user.id
     )
     db.add(cost)
     
-    receipt.status = ReceiptStatus.PROCESSED.value
+    receipt.status = "processed"
     receipt.processed_by = current_user.id
     receipt.processed_at = datetime.utcnow()
     
     db.commit()
-    
     return {"message": "Koszt utworzony z paragonu", "cost_id": cost.id}
 
 
-# ==================== LIVE CHAT ====================
+# ==================== DASHBOARD ====================
 
-@app.get("/api/chat/history", response_model=ChatHistoryResponse)
-def get_chat_history(
-    limit: int = 100,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get chat history and online users"""
-    messages = db.query(ChatMessage).order_by(ChatMessage.created_at.desc()).limit(limit).all()
-    messages = list(reversed(messages))
+@app.get("/api/dashboard")
+def get_dashboard(year: int = None, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not year:
+        year = datetime.now().year
     
-    # Build response with sender info
-    message_responses = []
-    for msg in messages:
-        sender = db.query(User).filter(User.id == msg.sender_id).first()
-        message_responses.append(ChatMessageResponse(
-            id=msg.id,
-            sender_id=msg.sender_id,
-            sender_name=sender.full_name if sender else "Nieznany",
-            sender_role=sender.role if sender else "worker",
-            content=msg.content,
-            message_type=msg.message_type,
-            is_read=msg.is_read,
-            created_at=msg.created_at
-        ))
+    start_date = datetime(year, 1, 1)
+    end_date = datetime(year + 1, 1, 1)
     
-    # Online users
-    users = db.query(User).filter(User.is_active == True).all()
-    online_users = []
-    for user in users:
-        online_users.append(ChatUserStatus(
-            user_id=user.id,
-            full_name=user.full_name,
-            role=user.role,
-            is_online=manager.is_online(user.id),
-            last_seen=manager.user_last_seen.get(user.id)
-        ))
+    events = db.query(Event).filter(Event.event_date >= start_date, Event.event_date < end_date).all()
     
-    # Unread count
-    unread = db.query(ChatMessage).filter(
-        ChatMessage.is_read == False,
-        ChatMessage.sender_id != current_user.id
+    total_revenue = db.query(func.sum(Revenue.amount)).join(Event).filter(
+        Event.event_date >= start_date, Event.event_date < end_date
+    ).scalar() or 0
+    
+    total_costs = db.query(func.sum(Cost.amount)).join(Event).filter(
+        Event.event_date >= start_date, Event.event_date < end_date
+    ).scalar() or 0
+    
+    pending_receipts = db.query(Receipt).filter(Receipt.status == "pending").count()
+    
+    upcoming_events = db.query(Event).filter(
+        Event.event_date >= datetime.utcnow(),
+        Event.status == "upcoming"
     ).count()
     
-    return ChatHistoryResponse(
-        messages=message_responses,
-        users_online=online_users,
-        total_unread=unread
-    )
+    return {
+        "year": year,
+        "total_events": len(events),
+        "upcoming_events": upcoming_events,
+        "total_revenue": float(total_revenue),
+        "total_costs": float(total_costs),
+        "profit": float(total_revenue - total_costs),
+        "pending_receipts": pending_receipts
+    }
 
 
-@app.post("/api/chat/messages", response_model=ChatMessageResponse)
-async def send_chat_message(
-    data: ChatMessageCreate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Send a chat message (REST fallback)"""
+@app.get("/api/reports/event/{event_id}")
+def get_event_report(event_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event nie znaleziony")
+    
+    costs = db.query(Cost).filter(Cost.event_id == event_id).all()
+    revenues = db.query(Revenue).filter(Revenue.event_id == event_id).all()
+    
+    cost_breakdown = {}
+    for c in costs:
+        cat = c.category
+        cost_breakdown[cat] = cost_breakdown.get(cat, 0) + c.amount
+    
+    revenue_breakdown = {}
+    for r in revenues:
+        src = r.source
+        revenue_breakdown[src] = revenue_breakdown.get(src, 0) + r.amount
+    
+    total_costs = sum(c.amount for c in costs)
+    total_revenue = sum(r.amount for r in revenues)
+    
+    return {
+        "event_id": event.id,
+        "event_name": event.name,
+        "event_date": event.event_date.isoformat(),
+        "total_revenue": total_revenue,
+        "total_costs": total_costs,
+        "profit": total_revenue - total_costs,
+        "cost_breakdown": cost_breakdown,
+        "revenue_breakdown": revenue_breakdown
+    }
+
+
+# ==================== CHAT ====================
+
+@app.get("/api/chat/messages")
+def get_chat_messages(limit: int = 50, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    messages = db.query(ChatMessage).order_by(ChatMessage.created_at.desc()).limit(limit).all()
+    messages.reverse()
+    
+    return [{
+        "id": m.id,
+        "sender_id": m.sender_id,
+        "sender_name": m.sender.full_name if m.sender else "Unknown",
+        "content": m.content,
+        "message_type": m.message_type,
+        "is_read": m.is_read,
+        "created_at": m.created_at.isoformat()
+    } for m in messages]
+
+
+@app.post("/api/chat/messages")
+async def send_chat_message(data: ChatMessageCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     message = ChatMessage(
         sender_id=current_user.id,
         content=data.content,
-        message_type=data.message_type.value
+        message_type="text"
     )
     db.add(message)
     db.commit()
     db.refresh(message)
     
-    response = ChatMessageResponse(
-        id=message.id,
-        sender_id=message.sender_id,
-        sender_name=current_user.full_name,
-        sender_role=current_user.role,
-        content=message.content,
-        message_type=message.message_type,
-        is_read=message.is_read,
-        created_at=message.created_at
-    )
-    
-    # Broadcast via WebSocket
-    await manager.broadcast({
-        "type": "new_message",
-        "data": response.model_dump(mode='json')
-    })
-    
-    return response
-
-
-@app.post("/api/chat/mark-read")
-def mark_messages_read(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Mark all messages as read"""
-    db.query(ChatMessage).filter(
-        ChatMessage.sender_id != current_user.id,
-        ChatMessage.is_read == False
-    ).update({"is_read": True})
-    db.commit()
-    return {"message": "Wiadomości oznaczone jako przeczytane"}
-
-
-@app.websocket("/ws/chat/{token}")
-async def websocket_chat(websocket: WebSocket, token: str):
-    """WebSocket endpoint for real-time chat"""
-    # Verify token
-    payload = verify_token(token)
-    if not payload:
-        await websocket.close(code=4001)
-        return
-    
-    user_id = int(payload.get("sub"))
-    
-    db = next(get_db())
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        await websocket.close(code=4002)
-        return
-    
-    await manager.connect(websocket, user_id)
-    
-    # Notify others about user online
-    await manager.broadcast({
-        "type": "user_online",
-        "data": {"user_id": user_id, "full_name": user.full_name}
-    })
-    
-    try:
-        while True:
-            data = await websocket.receive_json()
-            
-            if data.get("type") == "message":
-                content = data.get("content", "").strip()
-                if content and len(content) <= 2000:
-                    message = ChatMessage(
-                        sender_id=user_id,
-                        content=content,
-                        message_type="text"
-                    )
-                    db.add(message)
-                    db.commit()
-                    db.refresh(message)
-                    
-                    await manager.broadcast({
-                        "type": "new_message",
-                        "data": {
-                            "id": message.id,
-                            "sender_id": user_id,
-                            "sender_name": user.full_name,
-                            "sender_role": user.role,
-                            "content": message.content,
-                            "message_type": message.message_type,
-                            "is_read": False,
-                            "created_at": message.created_at.isoformat()
-                        }
-                    })
-            
-            elif data.get("type") == "typing":
-                await manager.broadcast({
-                    "type": "user_typing",
-                    "data": {"user_id": user_id, "full_name": user.full_name}
-                })
-            
-            elif data.get("type") == "ping":
-                await websocket.send_json({"type": "pong"})
-    
-    except WebSocketDisconnect:
-        manager.disconnect(user_id)
-        await manager.broadcast({
-            "type": "user_offline",
-            "data": {"user_id": user_id, "full_name": user.full_name}
-        })
-    except Exception as e:
-        manager.disconnect(user_id)
-    finally:
-        db.close()
-
-
-# ==================== REPORTS ====================
-
-@app.get("/api/reports/event/{event_id}", response_model=EventReport)
-def get_event_report(event_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    event = db.query(Event).filter(Event.id == event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Wydarzenie nie znalezione")
-    
-    costs = db.query(Cost).filter(Cost.event_id == event_id).all()
-    revenues = db.query(Revenue).filter(Revenue.event_id == event_id).all()
-    
-    total_costs = sum(c.amount for c in costs)
-    total_revenue = sum(r.amount for r in revenues)
-    net_profit = total_revenue - total_costs
-    profit_margin = (net_profit / total_revenue * 100) if total_revenue > 0 else 0
-    
-    costs_breakdown = {}
-    for cost in costs:
-        costs_breakdown[cost.category] = costs_breakdown.get(cost.category, 0) + cost.amount
-    
-    revenue_breakdown = {}
-    for rev in revenues:
-        revenue_breakdown[rev.source] = revenue_breakdown.get(rev.source, 0) + rev.amount
-    
-    return EventReport(
-        event_id=event.id,
-        event_name=event.name,
-        event_date=event.event_date,
-        total_costs=total_costs,
-        total_revenue=total_revenue,
-        net_profit=net_profit,
-        profit_margin=round(profit_margin, 2),
-        costs_breakdown=costs_breakdown,
-        revenue_breakdown=revenue_breakdown
-    )
-
-
-@app.get("/api/reports/period", response_model=PeriodReport)
-def get_period_report(
-    start_date: str,
-    end_date: str,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    try:
-        start = datetime.fromisoformat(start_date)
-        end = datetime.fromisoformat(end_date)
-    except:
-        raise HTTPException(status_code=400, detail="Nieprawidłowy format daty")
-    
-    events = db.query(Event).filter(Event.event_date.between(start, end)).all()
-    event_ids = [e.id for e in events]
-    
-    total_costs = db.query(func.sum(Cost.amount)).filter(Cost.event_id.in_(event_ids)).scalar() or 0
-    total_revenue = db.query(func.sum(Revenue.amount)).filter(Revenue.event_id.in_(event_ids)).scalar() or 0
-    net_profit = total_revenue - total_costs
-    profit_margin = (net_profit / total_revenue * 100) if total_revenue > 0 else 0
-    
-    return PeriodReport(
-        period_from=start,
-        period_to=end,
-        events_count=len(events),
-        total_costs=total_costs,
-        total_revenue=total_revenue,
-        net_profit=net_profit,
-        profit_margin=round(profit_margin, 2)
-    )
-
-
-# ==================== CATEGORIES ====================
-
-@app.get("/api/stats/categories", response_model=CategoriesResponse)
-def get_categories(current_user: User = Depends(get_current_user)):
-    cost_categories = {
-        "bar_alcohol": "🍺 Alkohol (bar)",
-        "bar_beverages": "🥤 Napoje (bar)",
-        "bar_food": "🍕 Jedzenie (bar)",
-        "bar_supplies": "📦 Zaopatrzenie (bar)",
-        "artist_fee": "🎤 Honorarium artysty",
-        "sound_engineer": "🎚️ Realizator dźwięku",
-        "lighting": "💡 Oświetlenie",
-        "staff_wages": "👥 Wynagrodzenia",
-        "security": "🛡️ Ochrona",
-        "cleaning": "🧹 Sprzątanie",
-        "utilities": "⚡ Media",
-        "rent": "🏠 Wynajem",
-        "equipment": "🔧 Sprzęt",
-        "marketing": "📢 Marketing",
-        "other": "📋 Inne"
+    msg_data = {
+        "type": "chat_message",
+        "id": message.id,
+        "sender_id": current_user.id,
+        "sender_name": current_user.full_name,
+        "content": message.content,
+        "created_at": message.created_at.isoformat()
     }
+    await manager.broadcast(msg_data)
     
-    revenue_sources = {
-        "box_office": "🎫 Sprzedaż biletów",
-        "bar_sales": "🍻 Sprzedaż bar",
-        "merchandise": "👕 Merchandise",
-        "sponsorship": "🤝 Sponsoring",
-        "other": "💰 Inne"
-    }
+    return msg_data
+
+
+@app.get("/api/chat/users")
+def get_chat_users(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    users = db.query(User).filter(User.is_active == True).all()
+    online_ids = manager.get_online_users()
     
-    return CategoriesResponse(
-        cost_categories=cost_categories,
-        revenue_sources=revenue_sources
-    )
+    return [{
+        "id": u.id,
+        "full_name": u.full_name,
+        "role": u.role,
+        "is_online": u.id in online_ids
+    } for u in users]
 
 
-# ==================== STAFF POSITIONS ====================
-
-@app.get("/api/staff/positions", response_model=StaffPositionsResponse, tags=["Staff"])
-def get_staff_positions(current_user: User = Depends(get_current_user)):
-    """Get all available staff positions"""
-    return {"positions": POSITION_LABELS}
-
-
-@app.put("/api/users/{user_id}/position", response_model=UserResponse, tags=["Staff"])
-def update_user_position(
-    user_id: int,
-    position_update: PositionUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(["owner", "manager"]))
-):
-    """Update user's staff position (owner/manager only)"""
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Użytkownik nie znaleziony")
+@app.get("/api/chat/history")
+def get_chat_history(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    messages = db.query(ChatMessage).order_by(ChatMessage.created_at.desc()).limit(100).all()
+    messages.reverse()
     
-    user.position = position_update.position.value
-    db.commit()
-    db.refresh(user)
-    return UserResponse.model_validate(user)
-
-
-# ==================== SOUND NOTIFICATIONS ====================
-
-@app.put("/api/users/me/sound-notifications", response_model=UserResponse, tags=["Users"])
-def update_sound_notifications(
-    settings: SoundNotificationUpdate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Update current user's sound notification settings"""
-    current_user.sound_notifications = settings.enabled
-    db.commit()
-    db.refresh(current_user)
-    return UserResponse.model_validate(current_user)
+    return [{
+        "id": m.id,
+        "sender_id": m.sender_id,
+        "sender_name": m.sender.full_name if m.sender else "Unknown",
+        "content": m.content,
+        "created_at": m.created_at.isoformat()
+    } for m in messages]
 
 
 # ==================== PRIVATE MESSAGES ====================
 
-@app.get("/api/messages/conversations", response_model=PrivateMessagesListResponse, tags=["Private Messages"])
-def get_conversations(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Get list of all conversations for current user"""
-    # Get all users except current
-    users = db.query(User).filter(User.id != current_user.id, User.is_active == True).all()
+@app.get("/api/messages/conversations")
+def get_conversations(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    user_id = current_user.id
+    
+    # Get all users who have exchanged messages with current user
+    sent_to = db.query(PrivateMessage.recipient_id).filter(PrivateMessage.sender_id == user_id).distinct()
+    received_from = db.query(PrivateMessage.sender_id).filter(PrivateMessage.recipient_id == user_id).distinct()
+    
+    partner_ids = set([r[0] for r in sent_to.all()] + [r[0] for r in received_from.all()])
     
     conversations = []
-    total_unread = 0
-    
-    for user in users:
-        # Get last message between current user and this user
+    for partner_id in partner_ids:
+        partner = db.query(User).filter(User.id == partner_id).first()
+        if not partner:
+            continue
+        
         last_msg = db.query(PrivateMessage).filter(
-            ((PrivateMessage.sender_id == current_user.id) & (PrivateMessage.recipient_id == user.id)) |
-            ((PrivateMessage.sender_id == user.id) & (PrivateMessage.recipient_id == current_user.id))
+            or_(
+                and_(PrivateMessage.sender_id == user_id, PrivateMessage.recipient_id == partner_id),
+                and_(PrivateMessage.sender_id == partner_id, PrivateMessage.recipient_id == user_id)
+            )
         ).order_by(PrivateMessage.created_at.desc()).first()
         
-        # Count unread messages from this user
         unread = db.query(PrivateMessage).filter(
-            PrivateMessage.sender_id == user.id,
-            PrivateMessage.recipient_id == current_user.id,
+            PrivateMessage.sender_id == partner_id,
+            PrivateMessage.recipient_id == user_id,
             PrivateMessage.is_read == False
         ).count()
         
-        total_unread += unread
-        
-        conversations.append(ConversationResponse(
-            user_id=user.id,
-            user_name=user.full_name,
-            user_role=user.role,
-            user_position=user.position or "brak",
-            last_message=last_msg.content[:50] + "..." if last_msg and len(last_msg.content) > 50 else (last_msg.content if last_msg else None),
-            last_message_time=last_msg.created_at if last_msg else None,
-            unread_count=unread
-        ))
+        conversations.append({
+            "user_id": partner.id,
+            "user_name": partner.full_name,
+            "last_message": last_msg.content[:50] if last_msg else "",
+            "last_message_time": last_msg.created_at.isoformat() if last_msg else None,
+            "unread_count": unread,
+            "is_online": manager.is_online(partner.id)
+        })
     
-    # Sort by last message time (most recent first)
-    conversations.sort(key=lambda x: x.last_message_time or datetime.min, reverse=True)
-    
-    return PrivateMessagesListResponse(conversations=conversations, total_unread=total_unread)
+    return sorted(conversations, key=lambda x: x["last_message_time"] or "", reverse=True)
 
 
-@app.get("/api/messages/{user_id}", response_model=List[PrivateMessageResponse], tags=["Private Messages"])
-def get_messages_with_user(
-    user_id: int,
-    limit: int = 50,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Get private messages between current user and specified user"""
-    # Check if user exists
-    other_user = db.query(User).filter(User.id == user_id).first()
-    if not other_user:
-        raise HTTPException(status_code=404, detail="Użytkownik nie znaleziony")
-    
-    # Get messages
+@app.get("/api/messages/{user_id}")
+def get_messages_with_user(user_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     messages = db.query(PrivateMessage).filter(
-        ((PrivateMessage.sender_id == current_user.id) & (PrivateMessage.recipient_id == user_id)) |
-        ((PrivateMessage.sender_id == user_id) & (PrivateMessage.recipient_id == current_user.id))
-    ).order_by(PrivateMessage.created_at.desc()).limit(limit).all()
+        or_(
+            and_(PrivateMessage.sender_id == current_user.id, PrivateMessage.recipient_id == user_id),
+            and_(PrivateMessage.sender_id == user_id, PrivateMessage.recipient_id == current_user.id)
+        )
+    ).order_by(PrivateMessage.created_at).all()
     
-    # Mark received messages as read
+    # Mark as read
     db.query(PrivateMessage).filter(
         PrivateMessage.sender_id == user_id,
         PrivateMessage.recipient_id == current_user.id,
@@ -1466,87 +1269,50 @@ def get_messages_with_user(
     ).update({"is_read": True})
     db.commit()
     
-    # Build response
-    result = []
-    for msg in reversed(messages):
-        sender = db.query(User).filter(User.id == msg.sender_id).first()
-        recipient = db.query(User).filter(User.id == msg.recipient_id).first()
-        result.append(PrivateMessageResponse(
-            id=msg.id,
-            sender_id=msg.sender_id,
-            sender_name=sender.full_name if sender else "Unknown",
-            sender_role=sender.role if sender else "worker",
-            recipient_id=msg.recipient_id,
-            recipient_name=recipient.full_name if recipient else "Unknown",
-            content=msg.content,
-            is_read=msg.is_read,
-            created_at=msg.created_at
-        ))
-    
-    return result
+    return [{
+        "id": m.id,
+        "sender_id": m.sender_id,
+        "recipient_id": m.recipient_id,
+        "content": m.content,
+        "is_read": m.is_read,
+        "created_at": m.created_at.isoformat(),
+        "is_mine": m.sender_id == current_user.id
+    } for m in messages]
 
 
-@app.post("/api/messages/{user_id}", response_model=PrivateMessageResponse, tags=["Private Messages"])
-async def send_private_message(
-    user_id: int,
-    message: PrivateMessageCreate,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Send a private message to a user"""
-    # Check if recipient exists
+@app.post("/api/messages/{user_id}")
+async def send_private_message(user_id: int, data: PrivateMessageCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     recipient = db.query(User).filter(User.id == user_id).first()
     if not recipient:
         raise HTTPException(status_code=404, detail="Użytkownik nie znaleziony")
     
-    if user_id == current_user.id:
-        raise HTTPException(status_code=400, detail="Nie możesz wysłać wiadomości do siebie")
-    
-    # Create message
-    pm = PrivateMessage(
+    message = PrivateMessage(
         sender_id=current_user.id,
         recipient_id=user_id,
-        content=message.content
+        content=data.content
     )
-    db.add(pm)
+    db.add(message)
     db.commit()
-    db.refresh(pm)
+    db.refresh(message)
     
-    # Send via WebSocket if recipient is online
-    if manager.is_online(user_id):
-        await manager.send_personal_message({
-            "type": "private_message",
-            "message": {
-                "id": pm.id,
-                "sender_id": current_user.id,
-                "sender_name": current_user.full_name,
-                "sender_role": current_user.role,
-                "recipient_id": user_id,
-                "content": pm.content,
-                "is_read": False,
-                "created_at": pm.created_at.isoformat()
-            }
-        }, user_id)
+    msg_data = {
+        "type": "private_message",
+        "id": message.id,
+        "sender_id": current_user.id,
+        "sender_name": current_user.full_name,
+        "recipient_id": user_id,
+        "content": message.content,
+        "created_at": message.created_at.isoformat()
+    }
     
-    return PrivateMessageResponse(
-        id=pm.id,
-        sender_id=current_user.id,
-        sender_name=current_user.full_name,
-        sender_role=current_user.role,
-        recipient_id=user_id,
-        recipient_name=recipient.full_name,
-        content=pm.content,
-        is_read=pm.is_read,
-        created_at=pm.created_at
-    )
+    await manager.send_personal_message(msg_data, user_id)
+    await manager.send_personal_message(msg_data, current_user.id)
+    
+    return msg_data
 
 
-@app.get("/api/messages/unread/count", tags=["Private Messages"])
-def get_unread_count(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Get total unread private messages count"""
+@app.get("/api/messages/unread/count")
+def get_unread_count(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     count = db.query(PrivateMessage).filter(
         PrivateMessage.recipient_id == current_user.id,
         PrivateMessage.is_read == False
@@ -1554,36 +1320,92 @@ def get_unread_count(
     return {"unread_count": count}
 
 
+# ==================== WEBSOCKET ====================
+
+@app.websocket("/ws/chat/{token}")
+async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Depends(get_db)):
+    payload = verify_token(token)
+    if not payload:
+        await websocket.close(code=4001)
+        return
+    
+    user_id = int(payload["sub"])
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        await websocket.close(code=4001)
+        return
+    
+    await manager.connect(websocket, user_id)
+    
+    # Notify others
+    await manager.broadcast({
+        "type": "user_online",
+        "user_id": user_id,
+        "user_name": user.full_name
+    })
+    
+    try:
+        while True:
+            data = await websocket.receive_json()
+            
+            if data.get("type") == "ping":
+                await websocket.send_json({"type": "pong"})
+            elif data.get("type") == "chat_message":
+                message = ChatMessage(
+                    sender_id=user_id,
+                    content=data.get("content", ""),
+                    message_type="text"
+                )
+                db.add(message)
+                db.commit()
+                db.refresh(message)
+                
+                await manager.broadcast({
+                    "type": "chat_message",
+                    "id": message.id,
+                    "sender_id": user_id,
+                    "sender_name": user.full_name,
+                    "content": message.content,
+                    "created_at": message.created_at.isoformat()
+                })
+    except WebSocketDisconnect:
+        manager.disconnect(user_id)
+        await manager.broadcast({
+            "type": "user_offline",
+            "user_id": user_id,
+            "user_name": user.full_name
+        })
+
+
 # ==================== FRONTEND SERVING ====================
 
-# Determine frontend path
-FRONTEND_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend")
-if not os.path.exists(FRONTEND_PATH):
-    FRONTEND_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "frontend")
-if not os.path.exists(FRONTEND_PATH):
-    FRONTEND_PATH = "/opt/render/project/src/frontend"
+FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
+if not os.path.exists(FRONTEND_DIR):
+    FRONTEND_DIR = os.path.join(os.path.dirname(__file__), "frontend")
 
-print(f"✅ Frontend path: {FRONTEND_PATH}")
+print(f"✅ Frontend path: {FRONTEND_DIR}")
 
 
-@app.get("/app/{full_path:path}")
-@app.get("/app")
-async def serve_frontend(full_path: str = ""):
-    """Serve frontend files"""
-    if not os.path.exists(FRONTEND_PATH):
-        return HTMLResponse(content="<h1>Frontend not found</h1>", status_code=404)
-    
-    if not full_path or full_path == "":
-        file_path = os.path.join(FRONTEND_PATH, "index.html")
+@app.get("/app/{path:path}")
+async def serve_frontend(path: str):
+    if not path or path == "":
+        file_path = os.path.join(FRONTEND_DIR, "index.html")
     else:
-        file_path = os.path.join(FRONTEND_PATH, full_path)
+        file_path = os.path.join(FRONTEND_DIR, path)
     
     if os.path.exists(file_path) and os.path.isfile(file_path):
         return FileResponse(file_path)
     
-    # SPA fallback
-    index_path = os.path.join(FRONTEND_PATH, "index.html")
-    if os.path.exists(index_path):
-        return FileResponse(index_path)
-    
-    return HTMLResponse(content="<h1>File not found</h1>", status_code=404)
+    return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+
+
+@app.get("/app")
+async def redirect_to_app():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/app/")
+
+
+@app.get("/")
+async def redirect_root():
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/app/")

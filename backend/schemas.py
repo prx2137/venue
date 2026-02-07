@@ -1,10 +1,10 @@
 """
 Pydantic Schemas for Music Venue Management System
-With Receipt OCR, Live Chat and Private Messages support
+With Events, Line-up, Technical Riders, Receipt OCR
 """
 
-from pydantic import BaseModel, EmailStr, field_validator, model_validator
-from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, EmailStr, field_validator
+from typing import Optional, List
 from datetime import datetime
 from enum import Enum
 
@@ -15,22 +15,6 @@ class UserRole(str, Enum):
     OWNER = "owner"
     MANAGER = "manager"
     WORKER = "worker"
-
-
-class StaffPosition(str, Enum):
-    """Staff positions at the venue"""
-    SWIETLIK = "swietlik"
-    TECHNIK = "technik"
-    AKUSTYK = "akustyk"
-    BARMAN = "barman"
-    BARBACK = "barback"
-    PROMOTOR = "promotor"
-    OCHRONA = "ochrona"
-    BRAMKA = "bramka"
-    SZATNIA = "szatnia"
-    REZYDENT = "rezydent"
-    SALA = "sala"
-    BRAK = "brak"
 
 
 class CostCategory(str, Enum):
@@ -66,31 +50,72 @@ class ReceiptStatus(str, Enum):
     REJECTED = "rejected"
 
 
-class MessageType(str, Enum):
-    TEXT = "text"
-    SYSTEM = "system"
-    ANNOUNCEMENT = "announcement"
+# ==================== STAFF POSITIONS ====================
+
+class StaffPositionCreate(BaseModel):
+    code: str
+    name: str
+    description: Optional[str] = ""
+    
+    @field_validator('code')
+    @classmethod
+    def code_valid(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Kod stanowiska jest wymagany')
+        # Only alphanumeric and underscore
+        clean = v.strip().lower().replace(' ', '_')
+        return clean
+    
+    @field_validator('name')
+    @classmethod
+    def name_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Nazwa stanowiska jest wymagana')
+        return v.strip()
+
+
+class StaffPositionUpdate(BaseModel):
+    code: Optional[str] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class StaffPositionResponse(BaseModel):
+    id: int
+    code: str
+    name: str
+    description: Optional[str]
+    is_active: bool
+    
+    model_config = {"from_attributes": True}
 
 
 # ==================== AUTH ====================
 
-class UserLogin(BaseModel):
+class LoginRequest(BaseModel):
     email: EmailStr
     password: str
 
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: "UserResponse"
+
+
+# ==================== USERS ====================
 
 class UserRegister(BaseModel):
     email: EmailStr
     password: str
     full_name: str
-    role: UserRole = UserRole.WORKER
-    position: StaffPosition = StaffPosition.BRAK
     
     @field_validator('password')
     @classmethod
-    def password_strength(cls, v):
+    def password_strong(cls, v):
         if len(v) < 6:
-            raise ValueError('Hasło musi mieć minimum 6 znaków')
+            raise ValueError('Hasło musi mieć min. 6 znaków')
         return v
     
     @field_validator('full_name')
@@ -99,6 +124,30 @@ class UserRegister(BaseModel):
         if not v or not v.strip():
             raise ValueError('Imię i nazwisko jest wymagane')
         return v.strip()
+
+
+class UserCreate(BaseModel):
+    """Schema for managers/owners to create users"""
+    email: EmailStr
+    password: str
+    full_name: str
+    role: UserRole = UserRole.WORKER
+    position: Optional[str] = "brak"
+    
+    @field_validator('password')
+    @classmethod
+    def password_strong(cls, v):
+        if len(v) < 6:
+            raise ValueError('Hasło musi mieć min. 6 znaków')
+        return v
+
+
+class UserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    role: Optional[UserRole] = None
+    position: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 class UserResponse(BaseModel):
@@ -114,51 +163,56 @@ class UserResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class UserUpdate(BaseModel):
-    full_name: Optional[str] = None
-    email: Optional[EmailStr] = None
-    role: Optional[UserRole] = None
-    position: Optional[StaffPosition] = None
-    is_active: Optional[bool] = None
-    password: Optional[str] = None
-    sound_notifications: Optional[bool] = None
-    
-    @field_validator('password')
-    @classmethod
-    def password_strength(cls, v):
-        if v is not None and len(v) < 6:
-            raise ValueError('Hasło musi mieć minimum 6 znaków')
-        return v
+class PositionUpdate(BaseModel):
+    position: str
 
 
-class UserCreate(BaseModel):
-    """Schema for managers/owners to create new users"""
-    email: EmailStr
-    password: str
-    full_name: str
-    role: UserRole = UserRole.WORKER
-    position: StaffPosition = StaffPosition.BRAK
-    is_active: bool = True
+class SoundNotificationUpdate(BaseModel):
+    enabled: bool
+
+
+# ==================== LINE-UP ====================
+
+class LineupEntryCreate(BaseModel):
+    artist_name: str
+    stage: str = "Scena główna"
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    description: Optional[str] = None
+    is_headliner: bool = False
+    order_index: int = 0
     
-    @field_validator('password')
-    @classmethod
-    def password_strength(cls, v):
-        if len(v) < 6:
-            raise ValueError('Hasło musi mieć minimum 6 znaków')
-        return v
-    
-    @field_validator('full_name')
+    @field_validator('artist_name')
     @classmethod
     def name_not_empty(cls, v):
         if not v or not v.strip():
-            raise ValueError('Imię i nazwisko jest wymagane')
+            raise ValueError('Nazwa artysty jest wymagana')
         return v.strip()
 
 
-class Token(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    user: UserResponse
+class LineupEntryUpdate(BaseModel):
+    artist_name: Optional[str] = None
+    stage: Optional[str] = None
+    start_time: Optional[datetime] = None
+    end_time: Optional[datetime] = None
+    description: Optional[str] = None
+    is_headliner: Optional[bool] = None
+    order_index: Optional[int] = None
+
+
+class LineupEntryResponse(BaseModel):
+    id: int
+    event_id: int
+    artist_name: str
+    stage: str
+    start_time: datetime
+    end_time: Optional[datetime]
+    description: Optional[str]
+    is_headliner: bool
+    order_index: int
+    created_at: datetime
+    
+    model_config = {"from_attributes": True}
 
 
 # ==================== EVENTS ====================
@@ -167,16 +221,21 @@ class EventCreate(BaseModel):
     name: str
     description: Optional[str] = None
     event_date: datetime
+    end_date: Optional[datetime] = None
     venue: str = "Sala Główna"
     expected_attendees: int = 0
     ticket_price: float = 0.0
     status: str = "upcoming"
+    color: str = "#3d6a99"
+    rider_stage1: Optional[str] = None
+    rider_stage2: Optional[str] = None
+    rider_notes: Optional[str] = None
     
     @field_validator('name')
     @classmethod
     def name_not_empty(cls, v):
         if not v or not v.strip():
-            raise ValueError('Nazwa wydarzenia jest wymagana')
+            raise ValueError('Nazwa eventu jest wymagana')
         return v.strip()
     
     @field_validator('expected_attendees', 'ticket_price')
@@ -191,10 +250,15 @@ class EventUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     event_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
     venue: Optional[str] = None
     expected_attendees: Optional[int] = None
     ticket_price: Optional[float] = None
     status: Optional[str] = None
+    color: Optional[str] = None
+    rider_stage1: Optional[str] = None
+    rider_stage2: Optional[str] = None
+    rider_notes: Optional[str] = None
 
 
 class EventResponse(BaseModel):
@@ -202,12 +266,34 @@ class EventResponse(BaseModel):
     name: str
     description: Optional[str]
     event_date: datetime
+    end_date: Optional[datetime] = None
     venue: Optional[str] = "Sala Główna"
     expected_attendees: Optional[int] = 0
     ticket_price: float
     status: Optional[str] = "upcoming"
+    color: Optional[str] = "#3d6a99"
+    rider_stage1: Optional[str] = None
+    rider_stage2: Optional[str] = None
+    rider_notes: Optional[str] = None
+    has_rider_file: Optional[bool] = False
+    rider_file_name: Optional[str] = None
     created_by: Optional[int]
     created_at: datetime
+    lineup: Optional[List[LineupEntryResponse]] = []
+    
+    model_config = {"from_attributes": True}
+
+
+class EventCalendarResponse(BaseModel):
+    """Simplified event for calendar view"""
+    id: int
+    name: str
+    event_date: datetime
+    end_date: Optional[datetime]
+    venue: str
+    status: str
+    color: str
+    expected_attendees: int
     
     model_config = {"from_attributes": True}
 
@@ -235,13 +321,6 @@ class CostUpdate(BaseModel):
     amount: Optional[float] = None
     description: Optional[str] = None
     cost_date: Optional[datetime] = None
-    
-    @field_validator('amount')
-    @classmethod
-    def amount_positive(cls, v):
-        if v is not None and v <= 0:
-            raise ValueError('Kwota musi być większa od zera')
-        return v
 
 
 class CostResponse(BaseModel):
@@ -250,7 +329,7 @@ class CostResponse(BaseModel):
     category: str
     amount: float
     description: Optional[str]
-    cost_date: Optional[datetime] = None
+    cost_date: Optional[datetime]
     receipt_id: Optional[int]
     created_by: Optional[int]
     created_at: datetime
@@ -278,13 +357,6 @@ class RevenueUpdate(BaseModel):
     source: Optional[RevenueSource] = None
     amount: Optional[float] = None
     description: Optional[str] = None
-    
-    @field_validator('amount')
-    @classmethod
-    def amount_positive(cls, v):
-        if v is not None and v <= 0:
-            raise ValueError('Kwota musi być większa od zera')
-        return v
 
 
 class RevenueResponse(BaseModel):
@@ -301,89 +373,50 @@ class RevenueResponse(BaseModel):
 
 # ==================== RECEIPTS ====================
 
-class ReceiptUpload(BaseModel):
-    """Upload receipt via text (legacy)"""
-    ocr_text: str
-    
-    @field_validator('ocr_text')
-    @classmethod
-    def text_not_empty(cls, v):
-        if not v or not v.strip():
-            raise ValueError('Tekst paragonu jest wymagany')
-        return v.strip()
-
-
-class OCRItem(BaseModel):
-    name: str
-    quantity: float = 1.0
-    price: float
-    category: Optional[str] = None
-
-
-class ReceiptOCRResult(BaseModel):
-    store_name: Optional[str] = None
-    receipt_date: Optional[str] = None
-    items: List[OCRItem] = []
-    total: Optional[float] = None
-    raw_text: Optional[str] = None
-
-
-class ReceiptUploadResponse(BaseModel):
-    id: int
-    store_name: Optional[str]
-    receipt_date: Optional[datetime]
-    total_amount: Optional[float]
-    ocr_result: ReceiptOCRResult
-    status: str
-    has_image: bool = False
-    created_at: datetime
-    
-    model_config = {"from_attributes": True}
-
-
 class ReceiptResponse(BaseModel):
     id: int
     store_name: Optional[str]
     receipt_date: Optional[datetime]
     total_amount: Optional[float]
+    ocr_text: Optional[str]
+    parsed_items: Optional[str]
     status: str
     uploaded_by: int
-    uploaded_by_name: Optional[str] = None
+    uploader_name: Optional[str] = None
     processed_by: Optional[int]
-    has_image: bool = False
+    processor_name: Optional[str] = None
     created_at: datetime
     processed_at: Optional[datetime]
+    has_image: bool = False
     
     model_config = {"from_attributes": True}
 
 
-class CreateCostsFromReceipt(BaseModel):
+class ReceiptToCost(BaseModel):
     receipt_id: int
     event_id: int
-    category: CostCategory = CostCategory.BAR_SUPPLIES
+    category: CostCategory
+    amount: Optional[float] = None
+    description: Optional[str] = None
 
 
 # ==================== CHAT ====================
 
 class ChatMessageCreate(BaseModel):
     content: str
-    message_type: MessageType = MessageType.TEXT
     
     @field_validator('content')
     @classmethod
     def content_not_empty(cls, v):
         if not v or not v.strip():
             raise ValueError('Wiadomość nie może być pusta')
-        if len(v) > 2000:
-            raise ValueError('Wiadomość może mieć maksymalnie 2000 znaków')
         return v.strip()
 
 
 class ChatMessageResponse(BaseModel):
     id: int
     sender_id: int
-    sender_name: str
-    sender_role: str
+    sender_name: Optional[str] = None
     content: str
     message_type: str
     is_read: bool
@@ -392,25 +425,9 @@ class ChatMessageResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class ChatUserStatus(BaseModel):
-    user_id: int
-    full_name: str
-    role: str
-    position: Optional[str] = "brak"
-    is_online: bool
-    last_seen: Optional[datetime] = None
-
-
-class ChatHistoryResponse(BaseModel):
-    messages: List[ChatMessageResponse]
-    users_online: List[ChatUserStatus]
-    total_unread: int
-
-
 # ==================== PRIVATE MESSAGES ====================
 
 class PrivateMessageCreate(BaseModel):
-    recipient_id: int
     content: str
     
     @field_validator('content')
@@ -418,18 +435,15 @@ class PrivateMessageCreate(BaseModel):
     def content_not_empty(cls, v):
         if not v or not v.strip():
             raise ValueError('Wiadomość nie może być pusta')
-        if len(v) > 2000:
-            raise ValueError('Wiadomość może mieć maksymalnie 2000 znaków')
         return v.strip()
 
 
 class PrivateMessageResponse(BaseModel):
     id: int
     sender_id: int
-    sender_name: str
-    sender_role: str
     recipient_id: int
-    recipient_name: str
+    sender_name: Optional[str] = None
+    recipient_name: Optional[str] = None
     content: str
     is_read: bool
     created_at: datetime
@@ -440,66 +454,54 @@ class PrivateMessageResponse(BaseModel):
 class ConversationResponse(BaseModel):
     user_id: int
     user_name: str
-    user_role: str
-    user_position: Optional[str] = "brak"
-    last_message: Optional[str] = None
-    last_message_time: Optional[datetime] = None
-    unread_count: int = 0
-
-
-class PrivateMessagesListResponse(BaseModel):
-    conversations: List[ConversationResponse]
-    total_unread: int
-
-
-# ==================== STAFF POSITIONS ====================
-
-class PositionUpdate(BaseModel):
-    user_id: int
-    position: StaffPosition
-
-
-class StaffPositionsResponse(BaseModel):
-    positions: Dict[str, str]
+    last_message: str
+    last_message_time: datetime
+    unread_count: int
+    is_online: bool = False
 
 
 # ==================== REPORTS ====================
+
+class DashboardStats(BaseModel):
+    total_events: int
+    upcoming_events: int
+    total_revenue: float
+    total_costs: float
+    profit: float
+    pending_receipts: int
+
 
 class EventReport(BaseModel):
     event_id: int
     event_name: str
     event_date: datetime
-    total_costs: float
     total_revenue: float
-    net_profit: float
-    profit_margin: float
-    costs_breakdown: Dict[str, float]
-    revenue_breakdown: Dict[str, float]
-
-
-class PeriodReport(BaseModel):
-    period_from: datetime
-    period_to: datetime
-    events_count: int
     total_costs: float
-    total_revenue: float
-    net_profit: float
-    profit_margin: float
+    profit: float
+    cost_breakdown: dict
+    revenue_breakdown: dict
 
 
-# ==================== CATEGORIES ====================
+# ==================== STAFF ASSIGNMENTS ====================
 
-class CategoriesResponse(BaseModel):
-    cost_categories: Dict[str, str]
-    revenue_sources: Dict[str, str]
-
-
-# ==================== GENERAL ====================
-
-class MessageResponse(BaseModel):
-    message: str
-    detail: Optional[str] = None
+class StaffAssignmentCreate(BaseModel):
+    user_id: int
+    event_id: int
+    position: str
+    notes: Optional[str] = None
 
 
-class SoundNotificationUpdate(BaseModel):
-    enabled: bool
+class StaffAssignmentResponse(BaseModel):
+    id: int
+    user_id: int
+    event_id: int
+    position: str
+    notes: Optional[str]
+    user_name: Optional[str] = None
+    event_name: Optional[str] = None
+    
+    model_config = {"from_attributes": True}
+
+
+# Update forward references
+TokenResponse.model_rebuild()

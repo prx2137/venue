@@ -37,22 +37,16 @@ let state = {
     privateUnreadCount: 0,
     soundEnabled: true,
     // Staff positions
-    positions: {}
+    positions: {},
+    // Calendar
+    calendarYear: new Date().getFullYear(),
+    calendarMonth: new Date().getMonth() + 1,
+    calendarEvents: [],
+    selectedDate: null
 };
 
-// Position labels
-const POSITION_LABELS = {
-    'swietlik': 'Świetlik',
-    'technik': 'Technik',
-    'akustyk': 'Akustyk',
-    'barman': 'Barman',
-    'barback': 'Barback',
-    'promotor': 'Promotor',
-    'ochrona': 'Ochrona',
-    'bramka': 'Bramka',
-    'szatnia': 'Szatnia',
-    'rezydent': 'Rezydent',
-    'sala': 'Sala',
+// Position labels - loaded dynamically from server
+let POSITION_LABELS = {
     'brak': 'Brak stanowiska'
 };
 
@@ -682,6 +676,7 @@ function showApp() {
     // Show admin menu for owner/manager
     if (['owner', 'manager'].includes(state.user.role)) {
         $('#users-nav').classList.remove('hidden');
+        $('#positions-nav').classList.remove('hidden');
     }
     
     loadInitialData();
@@ -771,7 +766,8 @@ async function loadInitialData() {
     try {
         await Promise.all([
             loadEvents(),
-            loadCategories()
+            loadCategories(),
+            loadPositions()
         ]);
         updateDashboard();
     } catch (error) {
@@ -786,6 +782,28 @@ async function loadEvents() {
 
 async function loadCategories() {
     state.categories = await api('/api/stats/categories');
+}
+
+async function loadPositions() {
+    try {
+        const data = await api('/api/staff/positions');
+        if (data && data.positions) {
+            POSITION_LABELS = data.positions;
+            state.positions = data.positions;
+        }
+    } catch (error) {
+        console.error('Failed to load positions:', error);
+    }
+}
+
+async function loadPositionsFull() {
+    try {
+        const positions = await api('/api/staff/positions/all');
+        return positions;
+    } catch (error) {
+        console.error('Failed to load full positions:', error);
+        return [];
+    }
 }
 
 async function loadUsers() {
@@ -856,65 +874,151 @@ function renderEvents() {
     const list = $('#events-list');
     
     if (!state.events.length) {
-        list.innerHTML = '<p class="text-center" style="color: var(--text-muted)">Brak wydarzeń</p>';
+        list.innerHTML = '<p class="text-center" style="color: var(--text-muted)">Brak eventów</p>';
         return;
     }
     
-    list.innerHTML = state.events.map(e => `
-        <div class="card">
+    const canEdit = ['owner', 'manager'].includes(state.user?.role);
+    
+    list.innerHTML = state.events.map(e => {
+        const lineupCount = e.lineup?.length || 0;
+        const hasRider = e.rider_stage1 || e.rider_stage2 || e.has_rider_file;
+        const statusBadge = {
+            'upcoming': 'primary',
+            'ongoing': 'warning',
+            'completed': 'success',
+            'cancelled': 'danger'
+        }[e.status] || 'secondary';
+        
+        return `
+        <div class="card" style="border-left: 4px solid ${e.color || '#3d6a99'}; cursor: pointer;" onclick="showEventDetails(${e.id})">
             <div class="card-header">
                 <div>
                     <div class="card-title">🎪 ${escapeHtml(e.name)}</div>
-                    <div class="card-subtitle">${formatDateTime(e.event_date)}</div>
+                    <div class="card-subtitle">
+                        📅 ${formatDateTime(e.event_date)} · 📍 ${e.venue || 'Sala Główna'}
+                    </div>
                 </div>
-                <span class="card-tag">${e.venue_capacity} miejsc</span>
+                <span class="badge badge-${statusBadge}">${e.status}</span>
             </div>
             <div class="card-body">
-                ${e.description ? escapeHtml(e.description) : 'Brak opisu'}
+                <div class="card-meta" style="display: flex; gap: 1rem; flex-wrap: wrap;">
+                    <span>👥 ${e.expected_attendees || 0} osób</span>
+                    <span>🎫 ${formatMoney(e.ticket_price)}</span>
+                    ${lineupCount > 0 ? `<span>🎤 ${lineupCount} artystów</span>` : ''}
+                    ${hasRider ? '<span>🎸 Rider</span>' : ''}
+                </div>
+                ${e.description ? `<p style="margin-top: 0.5rem; color: var(--text-muted)">${escapeHtml(e.description.substring(0, 100))}${e.description.length > 100 ? '...' : ''}</p>` : ''}
             </div>
-            <div class="card-footer">
-                <span class="card-amount">${formatMoney(e.ticket_price)} / bilet</span>
+            ${canEdit ? `
+            <div class="card-footer" onclick="event.stopPropagation()">
+                <span></span>
                 <div class="card-actions">
-                    <button class="btn btn-small btn-secondary" onclick="editEvent(${e.id})">✏️</button>
-                    <button class="btn btn-small btn-danger" onclick="deleteEvent(${e.id})">🗑️</button>
+                    <button class="btn btn-small btn-secondary" onclick="event.stopPropagation(); editEvent(${e.id})">✏️ Edytuj</button>
+                    <button class="btn btn-small btn-danger" onclick="event.stopPropagation(); deleteEvent(${e.id})">🗑️</button>
                 </div>
             </div>
+            ` : ''}
         </div>
-    `).join('');
+    `}).join('');
 }
 
 function showEventForm(event = null) {
     const isEdit = !!event;
+    const defaultDate = event ? new Date(event.event_date).toISOString().slice(0, 16) : '';
+    const endDate = event?.end_date ? new Date(event.end_date).toISOString().slice(0, 16) : '';
+    
     const html = `
         <form id="event-form">
             <div class="form-group">
-                <label>Nazwa wydarzenia *</label>
-                <input type="text" name="name" value="${event?.name || ''}" required>
+                <label>Nazwa eventu *</label>
+                <input type="text" name="name" value="${event?.name || ''}" required placeholder="np. Jazz Night">
             </div>
+            
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Data i godzina rozpoczęcia *</label>
+                    <input type="datetime-local" name="event_date" value="${defaultDate}" required>
+                </div>
+                <div class="form-group">
+                    <label>Data i godzina zakończenia</label>
+                    <input type="datetime-local" name="end_date" value="${endDate}">
+                </div>
+            </div>
+            
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Miejsce / Sala</label>
+                    <select name="venue">
+                        <option value="Sala Główna" ${event?.venue === 'Sala Główna' ? 'selected' : ''}>Sala Główna</option>
+                        <option value="Sala Kameralna" ${event?.venue === 'Sala Kameralna' ? 'selected' : ''}>Sala Kameralna</option>
+                        <option value="Taras" ${event?.venue === 'Taras' ? 'selected' : ''}>Taras</option>
+                        <option value="Cały klub" ${event?.venue === 'Cały klub' ? 'selected' : ''}>Cały klub</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Status</label>
+                    <select name="status">
+                        <option value="upcoming" ${event?.status === 'upcoming' ? 'selected' : ''}>Nadchodzący</option>
+                        <option value="ongoing" ${event?.status === 'ongoing' ? 'selected' : ''}>W trakcie</option>
+                        <option value="completed" ${event?.status === 'completed' ? 'selected' : ''}>Zakończony</option>
+                        <option value="cancelled" ${event?.status === 'cancelled' ? 'selected' : ''}>Odwołany</option>
+                    </select>
+                </div>
+            </div>
+            
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Oczekiwana liczba gości</label>
+                    <input type="number" name="expected_attendees" value="${event?.expected_attendees || 0}" min="0">
+                </div>
+                <div class="form-group">
+                    <label>Cena biletu (PLN)</label>
+                    <input type="number" name="ticket_price" value="${event?.ticket_price || 0}" min="0" step="0.01">
+                </div>
+            </div>
+            
             <div class="form-group">
-                <label>Data wydarzenia *</label>
-                <input type="datetime-local" name="event_date" value="${event ? new Date(event.event_date).toISOString().slice(0, 16) : ''}" required>
+                <label>Kolor w kalendarzu</label>
+                <div class="color-picker-wrapper">
+                    <input type="color" name="color" value="${event?.color || '#3d6a99'}">
+                    <span style="color: var(--text-muted)">Wybierz kolor dla kalendarza</span>
+                </div>
             </div>
-            <div class="form-group">
-                <label>Pojemność</label>
-                <input type="number" name="venue_capacity" value="${event?.venue_capacity || 0}" min="0">
-            </div>
-            <div class="form-group">
-                <label>Cena biletu (PLN)</label>
-                <input type="number" name="ticket_price" value="${event?.ticket_price || 0}" min="0" step="0.01">
-            </div>
+            
             <div class="form-group">
                 <label>Opis</label>
-                <textarea name="description">${event?.description || ''}</textarea>
+                <textarea name="description" class="form-textarea" placeholder="Opis eventu...">${event?.description || ''}</textarea>
             </div>
+            
+            <div class="form-section">
+                <div class="form-section-title">🎸 Rider techniczny (opcjonalnie)</div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Sprzęt - Scena 1</label>
+                        <textarea name="rider_stage1" class="form-textarea" rows="3" placeholder="np. Piano, DI Box...">${event?.rider_stage1 || ''}</textarea>
+                    </div>
+                    <div class="form-group">
+                        <label>Sprzęt - Scena 2</label>
+                        <textarea name="rider_stage2" class="form-textarea" rows="3" placeholder="np. Keyboard...">${event?.rider_stage2 || ''}</textarea>
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label>Uwagi do ridera</label>
+                    <textarea name="rider_notes" class="form-textarea" rows="2" placeholder="Dodatkowe wymagania...">${event?.rider_notes || ''}</textarea>
+                </div>
+            </div>
+            
             <div class="form-actions">
                 <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
-                <button type="submit" class="btn btn-primary">${isEdit ? 'Zapisz' : 'Dodaj'}</button>
+                <button type="submit" class="btn btn-primary">${isEdit ? 'Zapisz zmiany' : 'Dodaj event'}</button>
             </div>
         </form>
     `;
     
-    showModal(isEdit ? 'Edytuj wydarzenie' : 'Nowe wydarzenie', html);
+    showModal(isEdit ? 'Edytuj event' : 'Nowy event', html);
     
     $('#event-form').onsubmit = async (e) => {
         e.preventDefault();
@@ -922,18 +1026,25 @@ function showEventForm(event = null) {
         const data = {
             name: formData.get('name'),
             event_date: new Date(formData.get('event_date')).toISOString(),
-            venue_capacity: parseInt(formData.get('venue_capacity')) || 0,
+            end_date: formData.get('end_date') ? new Date(formData.get('end_date')).toISOString() : null,
+            venue: formData.get('venue'),
+            status: formData.get('status'),
+            expected_attendees: parseInt(formData.get('expected_attendees')) || 0,
             ticket_price: parseFloat(formData.get('ticket_price')) || 0,
-            description: formData.get('description')
+            color: formData.get('color'),
+            description: formData.get('description'),
+            rider_stage1: formData.get('rider_stage1') || null,
+            rider_stage2: formData.get('rider_stage2') || null,
+            rider_notes: formData.get('rider_notes') || null
         };
         
         try {
             if (isEdit) {
                 await api(`/api/events/${event.id}`, { method: 'PUT', body: JSON.stringify(data) });
-                toast('Wydarzenie zaktualizowane', 'success');
+                toast('Event zaktualizowany', 'success');
             } else {
                 await api('/api/events', { method: 'POST', body: JSON.stringify(data) });
-                toast('Wydarzenie dodane', 'success');
+                toast('Event dodany', 'success');
             }
             hideModal();
             await loadEvents();
@@ -1742,6 +1853,195 @@ function renderUsers() {
     }).join('');
 }
 
+// ==================== POSITIONS MANAGEMENT ====================
+
+async function renderPositions() {
+    const list = $('#positions-list');
+    if (!list) return;
+    
+    try {
+        const positions = await loadPositionsFull();
+        
+        if (!positions || positions.length === 0) {
+            list.innerHTML = '<p class="text-center" style="color: var(--text-muted)">Brak stanowisk. Dodaj pierwsze stanowisko!</p>';
+            return;
+        }
+        
+        // Sortuj alfabetycznie, ale "brak" na końcu
+        const sorted = [...positions].sort((a, b) => {
+            if (a.code === 'brak') return 1;
+            if (b.code === 'brak') return -1;
+            return a.name.localeCompare(b.name, 'pl');
+        });
+        
+        list.innerHTML = sorted.map(pos => `
+            <div class="card position-card ${!pos.is_active ? 'inactive' : ''}" data-position-id="${pos.id}">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">🎭 ${escapeHtml(pos.name)}</div>
+                        <div class="card-subtitle">Kod: <code>${escapeHtml(pos.code)}</code></div>
+                    </div>
+                    <span class="card-tag ${pos.is_active ? 'status-active' : 'status-inactive'}">
+                        ${pos.is_active ? '✅ Aktywne' : '❌ Nieaktywne'}
+                    </span>
+                </div>
+                ${pos.description ? `
+                <div class="card-body">
+                    <p style="color: var(--text-muted); margin: 0;">${escapeHtml(pos.description)}</p>
+                </div>
+                ` : ''}
+                <div class="card-footer">
+                    <div class="card-actions">
+                        ${pos.code !== 'brak' ? `
+                        <button class="btn btn-small btn-secondary" onclick="editPosition(${pos.id})" title="Edytuj stanowisko">
+                            ✏️ Edytuj
+                        </button>
+                        <button class="btn btn-small btn-danger" onclick="deletePosition(${pos.id})" title="Usuń stanowisko">
+                            🗑️ Usuń
+                        </button>
+                        ` : '<span style="color: var(--text-muted); font-size: 12px;">Domyślne stanowisko</span>'}
+                    </div>
+                </div>
+            </div>
+        `).join('');
+    } catch (error) {
+        list.innerHTML = '<p class="text-center" style="color: var(--danger)">Błąd ładowania stanowisk</p>';
+        console.error('Error loading positions:', error);
+    }
+}
+
+function addPosition() {
+    const html = `
+        <form id="position-form">
+            <div class="form-group">
+                <label>Nazwa stanowiska *</label>
+                <input type="text" name="name" required placeholder="np. DJ, Kierownik zmiany" maxlength="100">
+            </div>
+            <div class="form-group">
+                <label>Kod (identyfikator) *</label>
+                <input type="text" name="code" required placeholder="np. dj, kierownik_zmiany" maxlength="50" pattern="[a-z0-9_]+" title="Tylko małe litery, cyfry i podkreślenia">
+                <small class="form-hint">Tylko małe litery, cyfry i podkreślenia (np. dj_rezydent)</small>
+            </div>
+            <div class="form-group">
+                <label>Opis (opcjonalny)</label>
+                <input type="text" name="description" placeholder="Krótki opis stanowiska" maxlength="255">
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
+                <button type="submit" class="btn btn-primary">💾 Dodaj stanowisko</button>
+            </div>
+        </form>
+    `;
+    
+    showModal('➕ Dodaj nowe stanowisko', html);
+    
+    $('#position-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = {
+            name: formData.get('name'),
+            code: formData.get('code').toLowerCase().replace(/[^a-z0-9_]/g, '_'),
+            description: formData.get('description') || ''
+        };
+        
+        try {
+            await api('/api/staff/positions', {
+                method: 'POST',
+                body: JSON.stringify(data)
+            });
+            hideModal();
+            await loadPositions();
+            renderPositions();
+            toast('✅ Stanowisko dodane pomyślnie!');
+        } catch (error) {
+            toast('❌ ' + (error.message || 'Błąd dodawania stanowiska'), 'error');
+        }
+    });
+}
+
+async function editPosition(id) {
+    const positions = await loadPositionsFull();
+    const position = positions.find(p => p.id === id);
+    if (!position) {
+        toast('❌ Nie znaleziono stanowiska', 'error');
+        return;
+    }
+    
+    const html = `
+        <form id="position-form">
+            <div class="form-group">
+                <label>Nazwa stanowiska *</label>
+                <input type="text" name="name" required value="${escapeHtml(position.name)}" maxlength="100">
+            </div>
+            <div class="form-group">
+                <label>Kod (identyfikator)</label>
+                <input type="text" name="code" value="${escapeHtml(position.code)}" disabled>
+                <small class="form-hint">Kod nie może być zmieniony</small>
+            </div>
+            <div class="form-group">
+                <label>Opis</label>
+                <input type="text" name="description" value="${escapeHtml(position.description || '')}" maxlength="255">
+            </div>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" name="is_active" ${position.is_active ? 'checked' : ''}>
+                    Stanowisko aktywne
+                </label>
+            </div>
+            <div class="form-actions">
+                <button type="button" class="btn btn-secondary" onclick="hideModal()">Anuluj</button>
+                <button type="submit" class="btn btn-primary">💾 Zapisz zmiany</button>
+            </div>
+        </form>
+    `;
+    
+    showModal('✏️ Edytuj stanowisko', html);
+    
+    $('#position-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const formData = new FormData(e.target);
+        const data = {
+            name: formData.get('name'),
+            description: formData.get('description') || '',
+            is_active: formData.get('is_active') === 'on'
+        };
+        
+        try {
+            await api(`/api/staff/positions/${id}`, {
+                method: 'PUT',
+                body: JSON.stringify(data)
+            });
+            hideModal();
+            await loadPositions();
+            renderPositions();
+            toast('✅ Stanowisko zaktualizowane!');
+        } catch (error) {
+            toast('❌ ' + (error.message || 'Błąd aktualizacji stanowiska'), 'error');
+        }
+    });
+}
+
+async function deletePosition(id) {
+    const positions = await loadPositionsFull();
+    const position = positions.find(p => p.id === id);
+    if (!position) return;
+    
+    if (!confirm(`Czy na pewno chcesz usunąć stanowisko "${position.name}"?\n\nJeśli są przypisani użytkownicy, stanowisko zostanie dezaktywowane zamiast usunięte.`)) {
+        return;
+    }
+    
+    try {
+        const result = await api(`/api/staff/positions/${id}`, {
+            method: 'DELETE'
+        });
+        await loadPositions();
+        renderPositions();
+        toast('✅ ' + (result.message || 'Stanowisko usunięte'));
+    } catch (error) {
+        toast('❌ ' + (error.message || 'Błąd usuwania stanowiska'), 'error');
+    }
+}
+
 function openDirectMessage(userId) {
     showPrivateMessagesPanel();
     setTimeout(() => openConversation(userId), 300);
@@ -1969,6 +2269,9 @@ function switchView(viewName) {
     
     // Load view data
     switch (viewName) {
+        case 'calendar':
+            renderCalendar();
+            break;
         case 'events':
             renderEvents();
             break;
@@ -1982,7 +2285,10 @@ function switchView(viewName) {
             loadReceipts();
             break;
         case 'reports':
-            $('#report-content').innerHTML = '<p class="text-center" style="color: var(--text-muted)">Wybierz wydarzenie</p>';
+            $('#report-content').innerHTML = '<p class="text-center" style="color: var(--text-muted)">Wybierz event</p>';
+            break;
+        case 'positions':
+            renderPositions();
             break;
         case 'users':
             loadUsers().then(renderUsers);
@@ -2004,6 +2310,614 @@ function toggleChat() {
         loadChatHistory();
         $('#chat-input').focus();
     }
+}
+
+// ==================== CALENDAR ====================
+
+const MONTH_NAMES = ['Styczeń', 'Luty', 'Marzec', 'Kwiecień', 'Maj', 'Czerwiec', 
+                     'Lipiec', 'Sierpień', 'Wrzesień', 'Październik', 'Listopad', 'Grudzień'];
+const DAY_NAMES = ['Pon', 'Wto', 'Śro', 'Czw', 'Pią', 'Sob', 'Nie'];
+
+async function renderCalendar() {
+    const year = state.calendarYear;
+    const month = state.calendarMonth;
+    
+    // Update label
+    $('#calendar-month-label').textContent = `${MONTH_NAMES[month - 1]} ${year}`;
+    
+    // Load events for this month
+    try {
+        state.calendarEvents = await api(`/api/calendar/${year}/${month}`);
+    } catch (err) {
+        state.calendarEvents = [];
+    }
+    
+    const grid = $('#calendar-grid');
+    grid.innerHTML = '';
+    
+    // Header row
+    DAY_NAMES.forEach(day => {
+        grid.innerHTML += `<div class="calendar-header">${day}</div>`;
+    });
+    
+    // Get first day of month and total days
+    const firstDay = new Date(year, month - 1, 1);
+    const lastDay = new Date(year, month, 0);
+    const startWeekday = (firstDay.getDay() + 6) % 7; // Monday = 0
+    const totalDays = lastDay.getDate();
+    
+    // Previous month days
+    const prevMonth = new Date(year, month - 1, 0);
+    for (let i = startWeekday - 1; i >= 0; i--) {
+        const day = prevMonth.getDate() - i;
+        grid.innerHTML += `<div class="calendar-day other-month"><div class="calendar-day-number">${day}</div></div>`;
+    }
+    
+    // Current month days
+    const today = new Date();
+    for (let day = 1; day <= totalDays; day++) {
+        const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        const isToday = today.getFullYear() === year && today.getMonth() === month - 1 && today.getDate() === day;
+        const isSelected = state.selectedDate === dateStr;
+        
+        const dayEvents = state.calendarEvents.filter(e => e.event_date.startsWith(dateStr));
+        
+        let eventsHtml = '';
+        dayEvents.slice(0, 3).forEach(e => {
+            eventsHtml += `<div class="calendar-event-dot" style="background: ${e.color || '#3d6a99'}">${e.name.substring(0, 15)}</div>`;
+        });
+        if (dayEvents.length > 3) {
+            eventsHtml += `<div class="calendar-event-dot" style="background: var(--text-muted)">+${dayEvents.length - 3}</div>`;
+        }
+        
+        grid.innerHTML += `
+            <div class="calendar-day ${isToday ? 'today' : ''} ${isSelected ? 'selected' : ''}" 
+                 onclick="selectCalendarDay('${dateStr}')">
+                <div class="calendar-day-number">${day}</div>
+                <div class="calendar-day-events">${eventsHtml}</div>
+            </div>
+        `;
+    }
+    
+    // Next month days
+    const totalCells = startWeekday + totalDays;
+    const remaining = 7 - (totalCells % 7);
+    if (remaining < 7) {
+        for (let i = 1; i <= remaining; i++) {
+            grid.innerHTML += `<div class="calendar-day other-month"><div class="calendar-day-number">${i}</div></div>`;
+        }
+    }
+}
+
+function changeMonth(delta) {
+    state.calendarMonth += delta;
+    if (state.calendarMonth > 12) {
+        state.calendarMonth = 1;
+        state.calendarYear++;
+    } else if (state.calendarMonth < 1) {
+        state.calendarMonth = 12;
+        state.calendarYear--;
+    }
+    renderCalendar();
+}
+
+function selectCalendarDay(dateStr) {
+    state.selectedDate = dateStr;
+    renderCalendar();
+    
+    // Show events for this day
+    const dayEvents = state.calendarEvents.filter(e => e.event_date.startsWith(dateStr));
+    const container = $('#day-events-list');
+    
+    if (dayEvents.length === 0) {
+        container.innerHTML = '<p style="color: var(--text-muted)">Brak eventów w tym dniu</p>';
+        return;
+    }
+    
+    container.innerHTML = dayEvents.map(e => `
+        <div class="card" onclick="showEventDetails(${e.id})" style="border-left: 4px solid ${e.color || '#3d6a99'}; cursor: pointer;">
+            <div class="card-header">
+                <h4>${e.name}</h4>
+                <span class="badge">${e.status}</span>
+            </div>
+            <div class="card-meta">
+                <span>📍 ${e.venue}</span>
+                <span>👥 ${e.expected_attendees} osób</span>
+                <span>🕐 ${formatTime(e.event_date)}</span>
+            </div>
+        </div>
+    `).join('');
+}
+
+// ==================== EVENT DETAILS WITH LINE-UP & RIDER ====================
+
+async function showEventDetails(eventId) {
+    try {
+        const event = await api(`/api/events/${eventId}`);
+        
+        const content = `
+            <div class="event-detail-header">
+                <div>
+                    <h2 class="event-detail-title">${event.name}</h2>
+                    <div class="event-detail-meta">
+                        <span>📅 ${formatDate(event.event_date)}</span>
+                        <span>🕐 ${formatTime(event.event_date)}${event.end_date ? ' - ' + formatTime(event.end_date) : ''}</span>
+                        <span>📍 ${event.venue}</span>
+                        <span>👥 ${event.expected_attendees} osób</span>
+                        <span>🎫 ${event.ticket_price} zł</span>
+                    </div>
+                </div>
+                <span class="badge badge-${event.status === 'upcoming' ? 'primary' : event.status === 'completed' ? 'success' : 'warning'}">${event.status}</span>
+            </div>
+            
+            ${event.description ? `<p style="margin-bottom: 1.5rem; color: var(--text-secondary)">${event.description}</p>` : ''}
+            
+            <div class="event-tabs">
+                <button class="event-tab active" onclick="showEventTab('lineup', ${eventId})">🎤 Line-up</button>
+                <button class="event-tab" onclick="showEventTab('rider', ${eventId})">🎸 Rider techniczny</button>
+                <button class="event-tab" onclick="showEventTab('costs', ${eventId})">💸 Koszty</button>
+            </div>
+            
+            <div id="event-tab-lineup" class="event-tab-content active">
+                ${renderEventLineup(event)}
+            </div>
+            
+            <div id="event-tab-rider" class="event-tab-content">
+                ${renderEventRider(event)}
+            </div>
+            
+            <div id="event-tab-costs" class="event-tab-content">
+                <p style="color: var(--text-muted)">Ładowanie kosztów...</p>
+            </div>
+            
+            ${['owner', 'manager'].includes(state.user.role) ? `
+                <div style="margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">
+                    <button class="btn btn-primary" onclick="editEvent(${eventId})">✏️ Edytuj event</button>
+                    <button class="btn btn-danger" onclick="deleteEvent(${eventId})" style="margin-left: 0.5rem;">🗑️ Usuń</button>
+                </div>
+            ` : ''}
+        `;
+        
+        showModal(event.name, content);
+        
+        // Load costs for this event
+        loadEventCosts(eventId);
+        
+    } catch (err) {
+        toast('Błąd ładowania eventu', 'error');
+    }
+}
+
+function showEventTab(tab, eventId) {
+    $$('.event-tab').forEach(t => t.classList.remove('active'));
+    $$('.event-tab-content').forEach(c => c.classList.remove('active'));
+    
+    event.target.classList.add('active');
+    $(`#event-tab-${tab}`).classList.add('active');
+}
+
+function renderEventLineup(event) {
+    const lineup = event.lineup || [];
+    const canEdit = ['owner', 'manager'].includes(state.user?.role);
+    
+    if (lineup.length === 0) {
+        return `
+            <p style="color: var(--text-muted)">Brak pozycji w line-upie</p>
+            ${canEdit ? `<button class="btn btn-small btn-primary" onclick="addLineupEntry(${event.id})">+ Dodaj artystę</button>` : ''}
+        `;
+    }
+    
+    let html = '<div class="lineup-list">';
+    lineup.forEach(entry => {
+        const startTime = formatTime(entry.start_time);
+        const endTime = entry.end_time ? formatTime(entry.end_time) : '';
+        
+        html += `
+            <div class="lineup-entry ${entry.is_headliner ? 'headliner' : ''}">
+                <div class="lineup-time">${startTime}${endTime ? ' - ' + endTime : ''}</div>
+                <div class="lineup-artist">
+                    ${entry.artist_name}
+                    ${entry.is_headliner ? '<span class="headliner-badge">⭐ HEADLINER</span>' : ''}
+                    ${entry.description ? `<div style="font-size: 0.85rem; color: var(--text-muted)">${entry.description}</div>` : ''}
+                </div>
+                <div class="lineup-stage">📍 ${entry.stage}</div>
+                ${canEdit ? `
+                    <div class="lineup-actions">
+                        <button class="btn btn-small" onclick="editLineupEntry(${event.id}, ${entry.id})">✏️</button>
+                        <button class="btn btn-small btn-danger" onclick="deleteLineupEntry(${event.id}, ${entry.id})">🗑️</button>
+                    </div>
+                ` : ''}
+            </div>
+        `;
+    });
+    html += '</div>';
+    
+    if (canEdit) {
+        html += `<button class="btn btn-small btn-primary" style="margin-top: 1rem;" onclick="addLineupEntry(${event.id})">+ Dodaj artystę</button>`;
+    }
+    
+    return html;
+}
+
+function renderEventRider(event) {
+    const canEdit = ['owner', 'manager'].includes(state.user?.role);
+    
+    let html = '<div class="rider-grid">';
+    
+    // Stage 1
+    html += `
+        <div class="rider-box">
+            <h5>🎸 Scena 1 - Sprzęt</h5>
+            <pre>${event.rider_stage1 || 'Brak informacji'}</pre>
+        </div>
+    `;
+    
+    // Stage 2
+    html += `
+        <div class="rider-box">
+            <h5>🎹 Scena 2 - Sprzęt</h5>
+            <pre>${event.rider_stage2 || 'Brak informacji'}</pre>
+        </div>
+    `;
+    
+    html += '</div>';
+    
+    // Notes
+    if (event.rider_notes) {
+        html += `
+            <div class="rider-box" style="margin-top: 1rem;">
+                <h5>📝 Uwagi dodatkowe</h5>
+                <pre>${event.rider_notes}</pre>
+            </div>
+        `;
+    }
+    
+    // Uploaded file
+    if (event.has_rider_file && event.rider_file_name) {
+        html += `
+            <div class="rider-file">
+                <div class="rider-file-icon">${event.rider_file_name.endsWith('.pdf') ? '📄' : '📝'}</div>
+                <div class="rider-file-info">
+                    <div class="rider-file-name">${event.rider_file_name}</div>
+                    <div class="rider-file-type">Plik ridera technicznego</div>
+                </div>
+                <a href="${API_URL}/api/events/${event.id}/rider-file" class="btn btn-small" target="_blank">📥 Pobierz</a>
+                ${canEdit ? `<button class="btn btn-small btn-danger" onclick="deleteRiderFile(${event.id})">🗑️</button>` : ''}
+            </div>
+        `;
+    } else if (canEdit) {
+        html += `
+            <div style="margin-top: 1rem;">
+                <label class="btn btn-small btn-primary" style="cursor: pointer;">
+                    📤 Wgraj plik ridera (PDF/TXT)
+                    <input type="file" accept=".pdf,.txt" style="display: none;" onchange="uploadRiderFile(${event.id}, this.files[0])">
+                </label>
+            </div>
+        `;
+    }
+    
+    if (canEdit) {
+        html += `<button class="btn btn-small" style="margin-top: 1rem;" onclick="editEventRider(${event.id})">✏️ Edytuj rider</button>`;
+    }
+    
+    return html;
+}
+
+async function loadEventCosts(eventId) {
+    try {
+        const costs = await api(`/api/costs?event_id=${eventId}`);
+        const container = $('#event-tab-costs');
+        
+        if (costs.length === 0) {
+            container.innerHTML = '<p style="color: var(--text-muted)">Brak kosztów dla tego eventu</p>';
+            return;
+        }
+        
+        const total = costs.reduce((sum, c) => sum + c.amount, 0);
+        
+        container.innerHTML = `
+            <div class="costs-summary" style="margin-bottom: 1rem; padding: 1rem; background: var(--bg-tertiary); border-radius: var(--radius);">
+                <strong>Suma kosztów:</strong> ${formatCurrency(total)}
+            </div>
+            <div class="card-list">
+                ${costs.map(c => `
+                    <div class="card">
+                        <div class="card-header">
+                            <span>${getCategoryLabel(c.category)}</span>
+                            <span class="badge">${formatCurrency(c.amount)}</span>
+                        </div>
+                        ${c.description ? `<p style="color: var(--text-muted); margin-top: 0.5rem;">${c.description}</p>` : ''}
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    } catch (err) {
+        $('#event-tab-costs').innerHTML = '<p style="color: var(--danger)">Błąd ładowania kosztów</p>';
+    }
+}
+
+// ==================== LINE-UP MANAGEMENT ====================
+
+async function addLineupEntry(eventId) {
+    const event = state.events.find(e => e.id === eventId) || await api(`/api/events/${eventId}`);
+    const eventDate = new Date(event.event_date);
+    const defaultStart = eventDate.toISOString().slice(0, 16);
+    
+    const content = `
+        <form id="lineup-form">
+            <div class="form-group">
+                <label>Nazwa artysty / zespołu *</label>
+                <input type="text" name="artist_name" required placeholder="np. DJ Nazwa">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Scena</label>
+                    <select name="stage">
+                        <option value="Scena główna">Scena główna</option>
+                        <option value="Scena 2">Scena 2</option>
+                        <option value="Strefa chill">Strefa chill</option>
+                        <option value="Taras">Taras</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label><input type="checkbox" name="is_headliner"> Headliner</label>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Start *</label>
+                    <input type="datetime-local" name="start_time" required value="${defaultStart}">
+                </div>
+                <div class="form-group">
+                    <label>Koniec</label>
+                    <input type="datetime-local" name="end_time">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Opis / gatunek</label>
+                <input type="text" name="description" placeholder="np. Techno / House">
+            </div>
+            <button type="submit" class="btn btn-primary btn-block">Dodaj do line-upu</button>
+        </form>
+    `;
+    
+    showModal('Dodaj artystę do line-upu', content);
+    
+    $('#lineup-form').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const form = e.target;
+        
+        try {
+            await api(`/api/events/${eventId}/lineup`, {
+                method: 'POST',
+                body: JSON.stringify({
+                    artist_name: form.artist_name.value,
+                    stage: form.stage.value,
+                    start_time: form.start_time.value,
+                    end_time: form.end_time.value || null,
+                    description: form.description.value || null,
+                    is_headliner: form.is_headliner.checked
+                })
+            });
+            
+            toast('Artysta dodany do line-upu');
+            hideModal();
+            showEventDetails(eventId);
+        } catch (err) {
+            toast(err.message, 'error');
+        }
+    });
+}
+
+async function editLineupEntry(eventId, entryId) {
+    try {
+        const lineup = await api(`/api/events/${eventId}/lineup`);
+        const entry = lineup.find(l => l.id === entryId);
+        if (!entry) return;
+        
+        const content = `
+            <form id="lineup-edit-form">
+                <div class="form-group">
+                    <label>Nazwa artysty / zespołu *</label>
+                    <input type="text" name="artist_name" required value="${entry.artist_name}">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Scena</label>
+                        <select name="stage">
+                            <option value="Scena główna" ${entry.stage === 'Scena główna' ? 'selected' : ''}>Scena główna</option>
+                            <option value="Scena 2" ${entry.stage === 'Scena 2' ? 'selected' : ''}>Scena 2</option>
+                            <option value="Strefa chill" ${entry.stage === 'Strefa chill' ? 'selected' : ''}>Strefa chill</option>
+                            <option value="Taras" ${entry.stage === 'Taras' ? 'selected' : ''}>Taras</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label><input type="checkbox" name="is_headliner" ${entry.is_headliner ? 'checked' : ''}> Headliner</label>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Start *</label>
+                        <input type="datetime-local" name="start_time" required value="${entry.start_time.slice(0, 16)}">
+                    </div>
+                    <div class="form-group">
+                        <label>Koniec</label>
+                        <input type="datetime-local" name="end_time" value="${entry.end_time ? entry.end_time.slice(0, 16) : ''}">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Opis / gatunek</label>
+                    <input type="text" name="description" value="${entry.description || ''}">
+                </div>
+                <button type="submit" class="btn btn-primary btn-block">Zapisz zmiany</button>
+            </form>
+        `;
+        
+        showModal('Edytuj wpis line-upu', content);
+        
+        $('#lineup-edit-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const form = e.target;
+            
+            try {
+                await api(`/api/events/${eventId}/lineup/${entryId}`, {
+                    method: 'PUT',
+                    body: JSON.stringify({
+                        artist_name: form.artist_name.value,
+                        stage: form.stage.value,
+                        start_time: form.start_time.value,
+                        end_time: form.end_time.value || null,
+                        description: form.description.value || null,
+                        is_headliner: form.is_headliner.checked
+                    })
+                });
+                
+                toast('Wpis zaktualizowany');
+                hideModal();
+                showEventDetails(eventId);
+            } catch (err) {
+                toast(err.message, 'error');
+            }
+        });
+    } catch (err) {
+        toast('Błąd ładowania', 'error');
+    }
+}
+
+async function deleteLineupEntry(eventId, entryId) {
+    if (!confirm('Usunąć ten wpis z line-upu?')) return;
+    
+    try {
+        await api(`/api/events/${eventId}/lineup/${entryId}`, { method: 'DELETE' });
+        toast('Wpis usunięty');
+        showEventDetails(eventId);
+    } catch (err) {
+        toast(err.message, 'error');
+    }
+}
+
+// ==================== RIDER FILE MANAGEMENT ====================
+
+async function uploadRiderFile(eventId, file) {
+    if (!file) return;
+    
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    try {
+        const response = await fetch(`${API_URL}/api/events/${eventId}/rider-file`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${state.token}`
+            },
+            body: formData
+        });
+        
+        if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || 'Błąd uploadu');
+        }
+        
+        toast('Plik ridera wgrany');
+        showEventDetails(eventId);
+    } catch (err) {
+        toast(err.message, 'error');
+    }
+}
+
+async function deleteRiderFile(eventId) {
+    if (!confirm('Usunąć plik ridera?')) return;
+    
+    try {
+        await api(`/api/events/${eventId}/rider-file`, { method: 'DELETE' });
+        toast('Plik usunięty');
+        showEventDetails(eventId);
+    } catch (err) {
+        toast(err.message, 'error');
+    }
+}
+
+async function editEventRider(eventId) {
+    try {
+        const event = await api(`/api/events/${eventId}`);
+        
+        const content = `
+            <form id="rider-form">
+                <div class="form-section-title">🎸 Rider techniczny - edycja</div>
+                
+                <div class="form-group">
+                    <label>Sprzęt - Scena 1</label>
+                    <textarea name="rider_stage1" class="form-textarea" rows="4" placeholder="np. Piano Steinway, DI Box x2...">${event.rider_stage1 || ''}</textarea>
+                </div>
+                
+                <div class="form-group">
+                    <label>Sprzęt - Scena 2</label>
+                    <textarea name="rider_stage2" class="form-textarea" rows="4" placeholder="np. Keyboard, statyw...">${event.rider_stage2 || ''}</textarea>
+                </div>
+                
+                <div class="form-group">
+                    <label>Uwagi dodatkowe</label>
+                    <textarea name="rider_notes" class="form-textarea" rows="3" placeholder="Dodatkowe wymagania...">${event.rider_notes || ''}</textarea>
+                </div>
+                
+                <button type="submit" class="btn btn-primary btn-block">Zapisz rider</button>
+            </form>
+        `;
+        
+        showModal('Edytuj rider techniczny', content);
+        
+        $('#rider-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const form = e.target;
+            
+            try {
+                await api(`/api/events/${eventId}`, {
+                    method: 'PUT',
+                    body: JSON.stringify({
+                        rider_stage1: form.rider_stage1.value || null,
+                        rider_stage2: form.rider_stage2.value || null,
+                        rider_notes: form.rider_notes.value || null
+                    })
+                });
+                
+                toast('Rider zapisany');
+                hideModal();
+                showEventDetails(eventId);
+            } catch (err) {
+                toast(err.message, 'error');
+            }
+        });
+    } catch (err) {
+        toast('Błąd ładowania', 'error');
+    }
+}
+
+// ==================== SOUND NOTIFICATIONS ====================
+
+async function toggleSoundNotifications() {
+    state.soundEnabled = !state.soundEnabled;
+    
+    const btn = $('#sound-toggle');
+    btn.textContent = state.soundEnabled ? '🔔' : '🔕';
+    
+    try {
+        await api('/api/users/me/sound-notifications', {
+            method: 'PUT',
+            body: JSON.stringify({ enabled: state.soundEnabled })
+        });
+    } catch (err) {
+        // Silently fail
+    }
+    
+    toast(state.soundEnabled ? 'Dźwięki włączone' : 'Dźwięki wyłączone');
+}
+
+// ==================== HELPER FUNCTIONS ====================
+
+function formatTime(dateStr) {
+    if (!dateStr) return '';
+    const d = new Date(dateStr);
+    return d.toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' });
 }
 
 // ==================== EVENT LISTENERS ====================

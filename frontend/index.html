@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <meta name="theme-color" content="#6366f1">
+    <meta name="theme-color" content="#0a0d14">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>🎵 Music Venue - System Zarządzania</title>
@@ -49,6 +49,9 @@
                     <h1 class="app-title">🎵 Music Venue</h1>
                 </div>
                 <div class="header-right">
+                    <button id="sound-toggle" class="chat-btn" onclick="toggleSoundNotifications()" title="Powiadomienia dźwiękowe">
+                        🔔
+                    </button>
                     <button id="pm-toggle" class="chat-btn" onclick="showPrivateMessagesPanel()" title="Prywatne wiadomości" style="position: relative;">
                         📩
                         <span id="private-badge" class="badge hidden">0</span>
@@ -71,11 +74,13 @@
                 </div>
                 <ul class="nav-menu">
                     <li><a href="#" data-view="dashboard" class="nav-item active">📊 Dashboard</a></li>
-                    <li><a href="#" data-view="events" class="nav-item">🎪 Wydarzenia</a></li>
+                    <li><a href="#" data-view="calendar" class="nav-item">📅 Kalendarz</a></li>
+                    <li><a href="#" data-view="events" class="nav-item">🎪 Eventy</a></li>
                     <li><a href="#" data-view="costs" class="nav-item">💸 Koszty</a></li>
                     <li><a href="#" data-view="revenue" class="nav-item">💰 Przychody</a></li>
                     <li><a href="#" data-view="receipts" class="nav-item">🧾 Paragony</a></li>
                     <li><a href="#" data-view="reports" class="nav-item">📈 Raporty</a></li>
+                    <li id="positions-nav" class="hidden"><a href="#" data-view="positions" class="nav-item">🎭 Stanowiska</a></li>
                     <li id="users-nav" class="hidden"><a href="#" data-view="users" class="nav-item">👥 Użytkownicy</a></li>
                 </ul>
             </nav>
@@ -92,7 +97,7 @@
                             <div class="stat-icon">🎪</div>
                             <div class="stat-info">
                                 <span class="stat-value" id="total-events">0</span>
-                                <span class="stat-label">Wydarzenia</span>
+                                <span class="stat-label">Eventy</span>
                             </div>
                         </div>
                         <div class="stat-card">
@@ -118,16 +123,33 @@
                         </div>
                     </div>
                     <div class="recent-section">
-                        <h3>Ostatnie wydarzenia</h3>
+                        <h3>Najbliższe eventy</h3>
                         <div id="recent-events" class="card-list"></div>
+                    </div>
+                </div>
+
+                <!-- Calendar View -->
+                <div id="calendar-view" class="view">
+                    <div class="view-header">
+                        <h2>📅 Kalendarz eventów</h2>
+                        <div class="calendar-nav">
+                            <button class="btn btn-small" onclick="changeMonth(-1)">◀ Poprzedni</button>
+                            <span id="calendar-month-label" class="calendar-month-label">Luty 2026</span>
+                            <button class="btn btn-small" onclick="changeMonth(1)">Następny ▶</button>
+                        </div>
+                    </div>
+                    <div id="calendar-grid" class="calendar-grid"></div>
+                    <div id="calendar-events" class="calendar-events">
+                        <h3>Eventy w wybranym dniu</h3>
+                        <div id="day-events-list" class="card-list"></div>
                     </div>
                 </div>
 
                 <!-- Events View -->
                 <div id="events-view" class="view">
                     <div class="view-header">
-                        <h2>🎪 Wydarzenia</h2>
-                        <button id="add-event-btn" class="btn btn-primary">+ Dodaj</button>
+                        <h2>🎪 Eventy</h2>
+                        <button id="add-event-btn" class="btn btn-primary">+ Dodaj event</button>
                     </div>
                     <div id="events-list" class="card-list"></div>
                 </div>
@@ -140,7 +162,7 @@
                     </div>
                     <div class="filter-bar">
                         <select id="cost-event-filter" class="form-select">
-                            <option value="">Wszystkie wydarzenia</option>
+                            <option value="">Wszystkie eventy</option>
                         </select>
                     </div>
                     <div id="costs-list" class="card-list"></div>
@@ -154,7 +176,7 @@
                     </div>
                     <div class="filter-bar">
                         <select id="revenue-event-filter" class="form-select">
-                            <option value="">Wszystkie wydarzenia</option>
+                            <option value="">Wszystkie eventy</option>
                         </select>
                     </div>
                     <div id="revenue-list" class="card-list"></div>
@@ -176,13 +198,25 @@
                     </div>
                     <div class="report-filters">
                         <div class="form-group">
-                            <label>Wybierz wydarzenie</label>
+                            <label>Wybierz event</label>
                             <select id="report-event-select" class="form-select">
                                 <option value="">Wybierz...</option>
                             </select>
                         </div>
                     </div>
                     <div id="report-content" class="report-content"></div>
+                </div>
+
+                <!-- Positions View -->
+                <div id="positions-view" class="view">
+                    <div class="view-header">
+                        <h2>🎭 Zarządzanie stanowiskami</h2>
+                        <button id="add-position-btn" class="btn btn-primary" onclick="addPosition()">+ Dodaj stanowisko</button>
+                    </div>
+                    <div class="users-info-box">
+                        <p>💡 <strong>Info:</strong> Stanowiska można przypisywać użytkownikom. Właściciel i manager mogą dodawać nowe stanowiska oraz je usuwać.</p>
+                    </div>
+                    <div id="positions-list" class="card-list"></div>
                 </div>
 
                 <!-- Users View -->
@@ -224,7 +258,7 @@
 
         <!-- Modal -->
         <div id="modal" class="modal">
-            <div class="modal-content">
+            <div class="modal-content modal-large">
                 <div class="modal-header">
                     <h3 id="modal-title">Tytuł</h3>
                     <button class="modal-close">&times;</button>
