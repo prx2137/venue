@@ -407,20 +407,26 @@ function addChatMessage(msg) {
 
 function renderChatUsers() {
     const container = $('#users-online');
+    if (!container) return;
     container.innerHTML = '';
     
-    const onlineUsers = state.chatUsers.filter(u => u.is_online);
-    const offlineUsers = state.chatUsers.filter(u => !u.is_online);
+    const users = state.chatUsers || [];
+    const onlineUsers = users.filter(u => u.is_online);
+    const offlineUsers = users.filter(u => !u.is_online);
     
-    $('#online-count').textContent = onlineUsers.length;
+    const onlineCountEl = $('#online-count');
+    if (onlineCountEl) onlineCountEl.textContent = onlineUsers.length;
     
     [...onlineUsers, ...offlineUsers].forEach(user => {
         const chip = document.createElement('div');
-        chip.className = `user-chip ${user.role}`;
+        chip.className = `user-chip ${user.role || 'worker'} ${user.is_online ? 'online' : ''}`;
+        chip.title = `Kliknij aby rozpocząć prywatną rozmowę z ${user.full_name}`;
+        chip.style.cursor = 'pointer';
         chip.innerHTML = `
             <span class="status-dot ${user.is_online ? 'online' : ''}"></span>
             <span>${escapeHtml(user.full_name)}</span>
         `;
+        chip.onclick = () => startPrivateChat(user.user_id, user.full_name);
         container.appendChild(chip);
     });
 }
@@ -437,6 +443,37 @@ function updateUserStatus(userId, isOnline, fullName) {
         });
     }
     renderChatUsers();
+}
+
+function startPrivateChat(userId, userName) {
+    // Close chat panel if open
+    const chatPanel = $('#chat-panel');
+    if (chatPanel) chatPanel.classList.remove('active');
+    
+    // Open private messages panel and load conversation
+    showPrivateMessagesPanel();
+    
+    // Wait for modal to render, then open conversation
+    setTimeout(() => {
+        // Check if conversation exists, if not create placeholder
+        const conversations = state.conversations || [];
+        const existingConv = conversations.find(c => c.user_id === userId);
+        
+        if (!existingConv) {
+            // Add placeholder conversation for new chat
+            state.conversations.push({
+                user_id: userId,
+                user_name: userName,
+                user_role: 'worker',
+                last_message: null,
+                last_message_time: null,
+                unread_count: 0
+            });
+            renderConversations();
+        }
+        
+        openConversation(userId);
+    }, 300);
 }
 
 function updateChatBadge() {
@@ -625,9 +662,19 @@ function showPrivateMessagesPanel() {
             <div class="pm-sidebar">
                 <div class="pm-sidebar-header">
                     <h3>💬 Wiadomości</h3>
-                    <button class="btn btn-small" id="sound-toggle" onclick="toggleSoundNotifications()" title="${state.soundEnabled ? 'Wyłącz dźwięki' : 'Włącz dźwięki'}">
-                        ${state.soundEnabled ? '🔔' : '🔕'}
-                    </button>
+                    <div class="pm-header-buttons">
+                        <button class="btn btn-small btn-primary" onclick="showNewConversationSelector()" title="Nowa rozmowa">➕</button>
+                        <button class="btn btn-small" id="sound-toggle" onclick="toggleSoundNotifications()" title="${state.soundEnabled ? 'Wyłącz dźwięki' : 'Włącz dźwięki'}">
+                            ${state.soundEnabled ? '🔔' : '🔕'}
+                        </button>
+                    </div>
+                </div>
+                <div id="new-conversation-selector" class="new-conversation-selector hidden">
+                    <div class="selector-header">
+                        <span>Wybierz użytkownika:</span>
+                        <button class="btn btn-small" onclick="hideNewConversationSelector()">✕</button>
+                    </div>
+                    <div id="users-for-chat" class="users-for-chat"></div>
                 </div>
                 <div id="conversations-list" class="conversations-list">
                     <p class="text-center" style="color: var(--text-muted); padding: 1rem;">Ładowanie...</p>
@@ -636,7 +683,7 @@ function showPrivateMessagesPanel() {
             <div class="pm-main">
                 <div id="no-conversation-selected" class="no-conversation">
                     <div class="no-conversation-icon">💬</div>
-                    <p>Wybierz rozmowę z listy</p>
+                    <p>Wybierz rozmowę z listy lub kliknij ➕ aby rozpocząć nową</p>
                 </div>
                 <div id="conversation-panel" class="conversation-panel hidden">
                     <div class="conversation-header">
@@ -654,6 +701,55 @@ function showPrivateMessagesPanel() {
     
     showModal('Prywatne wiadomości', html, 'modal-large');
     loadConversations();
+}
+
+function showNewConversationSelector() {
+    const selector = $('#new-conversation-selector');
+    const container = $('#users-for-chat');
+    if (!selector || !container) return;
+    
+    selector.classList.remove('hidden');
+    
+    // Show all users (from chatUsers which has all users)
+    const users = state.chatUsers || [];
+    const existingConvUserIds = (state.conversations || []).map(c => c.user_id);
+    
+    // Filter out users already in conversations (show all for simplicity, but mark existing)
+    container.innerHTML = users.map(u => `
+        <div class="user-select-item ${u.is_online ? 'online' : ''}" onclick="selectUserForChat(${u.user_id}, '${escapeHtml(u.full_name).replace(/'/g, "\\'")}')">
+            <span class="status-dot ${u.is_online ? 'online' : ''}"></span>
+            <span class="user-select-name">${escapeHtml(u.full_name)}</span>
+            <span class="user-select-role">${getRoleLabel(u.role)}</span>
+        </div>
+    `).join('') || '<p style="padding: 1rem; color: var(--text-muted);">Brak dostępnych użytkowników</p>';
+}
+
+function hideNewConversationSelector() {
+    const selector = $('#new-conversation-selector');
+    if (selector) selector.classList.add('hidden');
+}
+
+function selectUserForChat(userId, userName) {
+    hideNewConversationSelector();
+    
+    // Check if conversation exists
+    const conversations = state.conversations || [];
+    const existingConv = conversations.find(c => c.user_id === userId);
+    
+    if (!existingConv) {
+        // Add new conversation placeholder
+        state.conversations.unshift({
+            user_id: userId,
+            user_name: userName,
+            user_role: 'worker',
+            last_message: null,
+            last_message_time: null,
+            unread_count: 0
+        });
+        renderConversations();
+    }
+    
+    openConversation(userId);
 }
 
 function handlePmKeypress(event) {

@@ -1255,16 +1255,17 @@ def get_chat_history(current_user: User = Depends(get_current_user), db: Session
     messages = db.query(ChatMessage).order_by(ChatMessage.created_at.desc()).limit(100).all()
     messages.reverse()
     
-    # Get online users
-    online_users = []
-    for user_id in manager.active_connections.keys():
-        user = db.query(User).filter(User.id == user_id).first()
-        if user:
-            online_users.append({
-                "id": user.id,
-                "full_name": user.full_name,
-                "role": user.role
-            })
+    # Get ALL users with online status
+    online_ids = manager.get_online_users()
+    all_users = db.query(User).filter(User.is_active == True, User.id != current_user.id).all()
+    
+    users_list = [{
+        "user_id": u.id,
+        "full_name": u.full_name,
+        "role": u.role,
+        "position": u.position,
+        "is_online": u.id in online_ids
+    } for u in all_users]
     
     return {
         "messages": [{
@@ -1276,7 +1277,7 @@ def get_chat_history(current_user: User = Depends(get_current_user), db: Session
             "message_type": m.message_type,
             "created_at": m.created_at.isoformat()
         } for m in messages],
-        "users_online": online_users,
+        "users_online": users_list,
         "total_unread": 0
     }
 
