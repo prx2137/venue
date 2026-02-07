@@ -1058,6 +1058,7 @@ async def call_ocr_api(image_base64: str, mime_type: str) -> str:
 
 
 @app.post("/api/receipts/upload")
+@app.post("/api/receipts/upload-image")  # Alias for frontend compatibility
 async def upload_receipt(
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
@@ -1129,6 +1130,31 @@ def list_receipts(current_user: User = Depends(get_current_user), db: Session = 
     return result
 
 
+@app.get("/api/receipts/{receipt_id}", response_model=ReceiptResponse)
+def get_receipt(receipt_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get single receipt by ID"""
+    receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
+    if not receipt:
+        raise HTTPException(status_code=404, detail="Paragon nie znaleziony")
+    
+    return ReceiptResponse(
+        id=receipt.id,
+        store_name=receipt.store_name,
+        receipt_date=receipt.receipt_date,
+        total_amount=receipt.total_amount,
+        ocr_text=receipt.ocr_text,
+        parsed_items=receipt.parsed_items,
+        status=receipt.status,
+        uploaded_by=receipt.uploaded_by,
+        uploader_name=receipt.uploader.full_name if receipt.uploader else None,
+        processed_by=receipt.processed_by,
+        processor_name=receipt.processor.full_name if receipt.processor else None,
+        created_at=receipt.created_at,
+        processed_at=receipt.processed_at,
+        has_image=receipt.image_data is not None
+    )
+
+
 @app.get("/api/receipts/{receipt_id}/image")
 def get_receipt_image(receipt_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
@@ -1140,6 +1166,7 @@ def get_receipt_image(receipt_id: int, current_user: User = Depends(get_current_
 
 
 @app.post("/api/receipts/{receipt_id}/to-cost")
+@app.post("/api/receipts/{receipt_id}/create-costs")  # Alias for frontend compatibility
 def receipt_to_cost(receipt_id: int, data: ReceiptToCost, current_user: User = Depends(require_role(["owner", "manager"])), db: Session = Depends(get_db)):
     receipt = db.query(Receipt).filter(Receipt.id == receipt_id).first()
     if not receipt:

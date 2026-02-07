@@ -12,4 +12,13 @@ services:
         generateValue: true
       - key: FRONTEND_URL
         value: "*"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: music-venue-db
+          property: connectionString
     healthCheckPath: /health
+
+databases:
+  - name: music-venue-db
+    plan: free
+    databaseName: music_venue
