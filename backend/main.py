@@ -447,7 +447,9 @@ def update_sound_notifications(data: SoundNotificationUpdate, current_user: User
 @app.get("/api/staff/positions")
 def get_positions(db: Session = Depends(get_db)):
     positions = db.query(StaffPosition).filter(StaffPosition.is_active == True).order_by(StaffPosition.name).all()
-    return [p.to_dict() for p in positions]
+    # Return as dict {code: name} for frontend POSITION_LABELS
+    positions_dict = {p.code: p.name for p in positions}
+    return {"positions": positions_dict}
 
 
 @app.get("/api/staff/positions/all")
@@ -1425,27 +1427,41 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
     try:
         while True:
             data = await websocket.receive_json()
+            msg_type = data.get("type", "")
             
-            if data.get("type") == "ping":
+            if msg_type == "ping":
                 await websocket.send_json({"type": "pong"})
-            elif data.get("type") == "chat_message":
-                message = ChatMessage(
-                    sender_id=user_id,
-                    content=data.get("content", ""),
-                    message_type="text"
-                )
-                db.add(message)
-                db.commit()
-                db.refresh(message)
-                
+            
+            elif msg_type in ("message", "chat_message"):
+                content = data.get("content", "").strip()
+                if content:
+                    message = ChatMessage(
+                        sender_id=user_id,
+                        content=content,
+                        message_type="text"
+                    )
+                    db.add(message)
+                    db.commit()
+                    db.refresh(message)
+                    
+                    await manager.broadcast({
+                        "type": "chat_message",
+                        "id": message.id,
+                        "sender_id": user_id,
+                        "sender_name": user.full_name,
+                        "sender_role": user.role,
+                        "content": message.content,
+                        "message_type": "text",
+                        "created_at": message.created_at.isoformat()
+                    })
+            
+            elif msg_type == "typing":
                 await manager.broadcast({
-                    "type": "chat_message",
-                    "id": message.id,
-                    "sender_id": user_id,
-                    "sender_name": user.full_name,
-                    "content": message.content,
-                    "created_at": message.created_at.isoformat()
+                    "type": "user_typing",
+                    "user_id": user_id,
+                    "user_name": user.full_name
                 })
+                
     except WebSocketDisconnect:
         manager.disconnect(user_id)
         await manager.broadcast({

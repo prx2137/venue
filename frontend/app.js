@@ -2061,10 +2061,16 @@ function openDirectMessage(userId) {
     setTimeout(() => openConversation(userId), 300);
 }
 
-function addUser() {
+async function addUser() {
     const isOwner = state.user.role === 'owner';
     
-    const positionOptions = Object.entries(POSITION_LABELS).map(([value, label]) => 
+    // Ensure positions are loaded
+    if (!POSITION_LABELS || Object.keys(POSITION_LABELS).length <= 1) {
+        await loadPositions();
+    }
+    
+    const positions = POSITION_LABELS || {'brak': 'Brak stanowiska'};
+    const positionOptions = Object.entries(positions).map(([value, label]) => 
         `<option value="${value}">${label}</option>`
     ).join('');
     
@@ -2145,15 +2151,21 @@ function addUser() {
     };
 }
 
-function editUser(id) {
+async function editUser(id) {
     const user = state.users.find(u => u.id === id);
     if (!user) return;
+    
+    // Ensure positions are loaded
+    if (!POSITION_LABELS || Object.keys(POSITION_LABELS).length <= 1) {
+        await loadPositions();
+    }
     
     const isOwner = state.user.role === 'owner';
     const canChangeRole = isOwner && user.id !== state.user.id;
     const canChangePosition = ['owner', 'manager'].includes(state.user.role);
     
-    const positionOptions = Object.entries(POSITION_LABELS).map(([value, label]) => 
+    const positions = POSITION_LABELS || {'brak': 'Brak stanowiska'};
+    const positionOptions = Object.entries(positions).map(([value, label]) => 
         `<option value="${value}" ${user.position === value ? 'selected' : ''}>${label}</option>`
     ).join('');
     
