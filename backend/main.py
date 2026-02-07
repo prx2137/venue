@@ -128,6 +128,82 @@ async def startup_event():
         
         db.commit()
         print("✅ Default users created")
+        
+        # Create sample events if none exist
+        existing_events = db.query(Event).count()
+        if existing_events == 0:
+            sample_events = [
+                {
+                    "name": "Jazz Night - Marcin Wasilewski Trio",
+                    "description": "Wieczór z najlepszym polskim jazz trio. Marcin Wasilewski na fortepianie, Sławomir Kurkiewicz na kontrabasie i Michał Miśkiewicz na perkusji.",
+                    "event_date": datetime(2026, 2, 14, 20, 0),
+                    "venue": "Sala Główna",
+                    "expected_attendees": 150,
+                    "ticket_price": 89.00,
+                    "status": "upcoming"
+                },
+                {
+                    "name": "Rock Covers Party",
+                    "description": "Coverowy wieczór rockowy! Najlepsze utwory Led Zeppelin, AC/DC, Metallica i wielu innych w wykonaniu lokalnych zespołów.",
+                    "event_date": datetime(2026, 2, 21, 21, 0),
+                    "venue": "Sala Główna",
+                    "expected_attendees": 200,
+                    "ticket_price": 45.00,
+                    "status": "upcoming"
+                },
+                {
+                    "name": "Elektroniczna Noc - DJ Set",
+                    "description": "Najlepsza muzyka elektroniczna od house przez techno po drum and bass. Specjalny gość: DJ Krystian z Berlina.",
+                    "event_date": datetime(2026, 2, 28, 22, 0),
+                    "venue": "Sala Klubowa",
+                    "expected_attendees": 250,
+                    "ticket_price": 55.00,
+                    "status": "upcoming"
+                }
+            ]
+            
+            created_events = []
+            for event_data in sample_events:
+                event = Event(**event_data)
+                db.add(event)
+                created_events.append(event)
+            
+            db.commit()
+            
+            # Refresh to get IDs
+            for event in created_events:
+                db.refresh(event)
+            
+            # Create sample costs for events
+            sample_costs = [
+                # Koszty dla Jazz Night
+                {"event_id": created_events[0].id, "description": "Honorarium artysty - Marcin Wasilewski Trio", "amount": 8500.00, "category": "artist_fee", "cost_date": datetime(2026, 2, 10)},
+                {"event_id": created_events[0].id, "description": "Nagłośnienie i oświetlenie", "amount": 1200.00, "category": "equipment", "cost_date": datetime(2026, 2, 13)},
+                {"event_id": created_events[0].id, "description": "Catering dla artystów", "amount": 450.00, "category": "food_drinks", "cost_date": datetime(2026, 2, 14)},
+                {"event_id": created_events[0].id, "description": "Plakaty i promocja w social media", "amount": 350.00, "category": "marketing", "cost_date": datetime(2026, 2, 5)},
+                
+                # Koszty dla Rock Covers Party
+                {"event_id": created_events[1].id, "description": "Honoraria dla 3 zespołów coverowych", "amount": 4500.00, "category": "artist_fee", "cost_date": datetime(2026, 2, 18)},
+                {"event_id": created_events[1].id, "description": "Wynajem dodatkowego sprzętu", "amount": 800.00, "category": "equipment", "cost_date": datetime(2026, 2, 20)},
+                {"event_id": created_events[1].id, "description": "Napoje i przekąski", "amount": 650.00, "category": "food_drinks", "cost_date": datetime(2026, 2, 21)},
+                {"event_id": created_events[1].id, "description": "Ochrona - 4 osoby", "amount": 1200.00, "category": "security", "cost_date": datetime(2026, 2, 21)},
+                
+                # Koszty dla Elektroniczna Noc
+                {"event_id": created_events[2].id, "description": "DJ Krystian - honorarium + przelot", "amount": 5500.00, "category": "artist_fee", "cost_date": datetime(2026, 2, 25)},
+                {"event_id": created_events[2].id, "description": "Dodatkowe oświetlenie LED", "amount": 1500.00, "category": "equipment", "cost_date": datetime(2026, 2, 27)},
+                {"event_id": created_events[2].id, "description": "Promocja na Facebooku i Instagramie", "amount": 600.00, "category": "marketing", "cost_date": datetime(2026, 2, 15)},
+                {"event_id": created_events[2].id, "description": "Ochrona - 6 osób", "amount": 1800.00, "category": "security", "cost_date": datetime(2026, 2, 28)},
+            ]
+            
+            for cost_data in sample_costs:
+                cost = Cost(**cost_data)
+                db.add(cost)
+            
+            db.commit()
+            print("✅ Sample data created successfully")
+        else:
+            print("ℹ️ Sample data already exists")
+            
     except Exception as e:
         print(f"⚠️ Startup: {e}")
     finally:
@@ -577,20 +653,52 @@ def simple_ocr_parse(text: str) -> ReceiptOCRResult:
             receipt_date = match.group(1)
             break
     
-    # Total amount
+    # Total amount - improved Polish receipt detection
     total = None
     total_patterns = [
+        # Polish patterns - most specific first
+        r'suma\s*pln[:\s]*(\d+[.,]\d{2})',
+        r'suma\s*zł[:\s]*(\d+[.,]\d{2})',
+        r'kwota\s*do\s*zap[łl]aty[:\s]*(\d+[.,]\d{2})',
+        r'do\s*zap[łl]aty\s*pln[:\s]*(\d+[.,]\d{2})',
+        r'do\s*zap[łl]aty[:\s]*(\d+[.,]\d{2})',
+        r'razem\s*pln[:\s]*(\d+[.,]\d{2})',
+        r'razem\s*zł[:\s]*(\d+[.,]\d{2})',
+        r'suma[:\s]*(\d+[.,]\d{2})\s*pln',
+        r'suma[:\s]*(\d+[.,]\d{2})\s*zł',
         r'suma[:\s]*(\d+[.,]\d{2})',
         r'razem[:\s]*(\d+[.,]\d{2})',
-        r'do\s*zap[łl]aty[:\s]*(\d+[.,]\d{2})',
+        r'wartość\s*brutto[:\s]*(\d+[.,]\d{2})',
+        r'wartość[:\s]*(\d+[.,]\d{2})',
+        r'ogółem[:\s]*(\d+[.,]\d{2})',
+        r'łącznie[:\s]*(\d+[.,]\d{2})',
+        r'należność[:\s]*(\d+[.,]\d{2})',
+        r'gotówka[:\s]*(\d+[.,]\d{2})',
+        r'karta[:\s]*(\d+[.,]\d{2})',
+        r'płatność[:\s]*(\d+[.,]\d{2})',
+        # Biedronka specific
+        r'sprzedaż\s*opod\.\s*pln[:\s]*(\d+[.,]\d{2})',
+        # Generic
         r'total[:\s]*(\d+[.,]\d{2})',
         r'kwota[:\s]*(\d+[.,]\d{2})',
+        # Last resort - find largest amount on receipt
     ]
+    
     for pattern in total_patterns:
         match = re.search(pattern, text.lower())
         if match:
             total = float(match.group(1).replace(',', '.'))
             break
+    
+    # If no total found, try to find the largest reasonable amount
+    if total is None:
+        all_amounts = re.findall(r'(\d+[.,]\d{2})', text)
+        if all_amounts:
+            amounts = [float(a.replace(',', '.')) for a in all_amounts]
+            # Filter reasonable receipt totals (1-10000 PLN)
+            reasonable = [a for a in amounts if 1 <= a <= 10000]
+            if reasonable:
+                total = max(reasonable)  # Usually total is the largest amount
     
     # Parse items
     items = []
