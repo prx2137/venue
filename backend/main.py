@@ -108,12 +108,16 @@ manager = ConnectionManager()
 
 @app.on_event("startup")
 async def startup_event():
-    Base.metadata.create_all(bind=engine)
-    print("✅ Database tables created")
+    try:
+        Base.metadata.create_all(bind=engine)
+        print("✅ Database tables created")
+    except Exception as e:
+        print(f"⚠️ Database init error (will retry on first request): {e}")
+        return  # Don't try to create default data if DB failed
     
     # Create default data
-    db = next(get_db())
     try:
+        db = next(get_db())
         # Create default positions
         existing_positions = db.query(StaffPosition).first()
         if not existing_positions:
@@ -288,12 +292,17 @@ async def startup_event():
             
             db.commit()
             print("✅ Sample events, line-ups and costs created")
+        
+        db.close()
+        print("✅ Startup complete!")
             
     except Exception as e:
-        print(f"⚠️ Startup error: {e}")
-        db.rollback()
-    finally:
-        db.close()
+        print(f"⚠️ Startup data error (app will work, just without default data): {e}")
+        try:
+            db.rollback()
+            db.close()
+        except:
+            pass
 
 
 # ==================== AUTH HELPERS ====================
@@ -321,6 +330,19 @@ def require_role(roles: List[str]):
             raise HTTPException(status_code=403, detail="Brak uprawnień")
         return current_user
     return role_checker
+
+
+# ==================== HEALTH CHECK ====================
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint for Render"""
+    return {"status": "healthy", "version": "3.0.0"}
+
+@app.get("/")
+def root():
+    """Root endpoint"""
+    return {"message": "Music Venue API", "status": "running"}
 
 
 # ==================== AUTH ENDPOINTS ====================
